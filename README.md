@@ -27,14 +27,6 @@ the Shopify App Store, and it is the one its developers actually open. One Fly m
 Postgres, polling the Partner API every 15 minutes, serving a real hostname since August 2026, when
 [Mantle](https://docs.heymantle.com/wind-down) shut down and the replacement had to exist.
 
-That matters in two directions, and only one of them is flattering:
-
-- **Every trap in [Things the Partner API will get you wrong](#things-the-partner-api-will-get-you-wrong)
-  was paid for.** Each one is a bug that shipped, reported a wrong number for a while, and was found
-  against a live app with real money in it. That list is the most valuable thing in this repository.
-- **It is shaped like one app's problem.** One Partner org, one app, one Postgres, one machine, and
-  opinions where a product would have settings. Not a platform, and not trying to be.
-
 **The screenshots are not that app.** They come from `scripts/seed_demo.py`, which invents an app
 called Demo App and about two hundred fictional merchants. No real merchant, domain, contact or
 revenue figure appears anywhere in this repository, in the screenshots, or in the git history.
