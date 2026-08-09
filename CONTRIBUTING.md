@@ -48,8 +48,8 @@ CI runs the suite, `pip-audit` against the lockfile, and `gitleaks` over full hi
 ## Seeing your change
 
 `scripts/seed_demo.py` builds a synthetic app's full history so you can look at a real dashboard
-without a Partner token. The invocation is in the README. Two rules it holds to, and a patch should
-keep both:
+without a Partner token. Its docstring has the invocation, environment and all. Two rules it holds
+to, and a patch should keep both:
 
 - **It writes through the live pipeline.** `upsert_raw_events` / `upsert_charges` /
   `upsert_transactions`, then `derive_installation`. If it inserted `subscriptions` rows itself it

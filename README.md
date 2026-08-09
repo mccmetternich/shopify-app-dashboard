@@ -31,41 +31,6 @@ Postgres, polling the Partner API every 15 minutes, serving a real hostname sinc
 called Demo App and about two hundred fictional merchants. No real merchant, domain, contact or
 revenue figure appears anywhere in this repository, in the screenshots, or in the git history.
 
-## Try it in about a minute
-
-No Partner token needed. This builds the dataset in every screenshot on this page:
-
-```bash
-uv sync
-createdb app_dashboard_demo
-
-export DATABASE_URL=postgresql://localhost:5432/app_dashboard_demo
-export PARTNER_API_TOKEN=unused PARTNER_ORG_ID=0 PARTNER_APP_ID=0
-export DASHBOARD_USERS=demo:demo-only-not-a-password
-export PUBLIC_BASE_URL=http://localhost:8000 GOOGLE_ALLOWED_DOMAINS=example.com
-export ANNUAL_PLAN_AMOUNTS=190.00 APP_NAME="Demo App" GA4_PROPERTY_ID=000000000
-export NO_SCHEDULER=1
-
-uv run python scripts/seed_demo.py --yes
-uv run uvicorn app_dashboard.web:app --reload
-```
-
-Then open <http://localhost:8000> and sign in with `demo` / `demo-only-not-a-password`.
-
-The seeder writes through the same functions the live pipeline uses and then replays derivation, so
-what you get is a dashboard the real code path can actually produce rather than a mock-up.
-`scripts/check_invariants.py` passes against it, all fourteen, which is the check that it is
-consistent and not merely plausible-looking:
-
-```bash
-uv run python scripts/check_invariants.py
-```
-
-`ANNUAL_PLAN_AMOUNTS=190.00` in there is not decoration. Drop it and the demo's annual plan is
-counted as monthly, at twelve times its real MRR, on every page and with nothing to say so. That is
-the single easiest way to make this dashboard lie, which is why the seeder refuses to run without
-it.
-
 ## What it gives you
 
 - **Overview** with prior-period comparison on every tile, an MRR movements waterfall
