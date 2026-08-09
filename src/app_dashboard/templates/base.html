@@ -353,7 +353,7 @@
         }
         /* 28px mono keeps a 4-digit MRR inside a 184px tile; 32px did not. */
         .stat .num { font-family: var(--mono); font-weight: 600; font-size: 28px; line-height: 1.15; letter-spacing: -0.01em; }
-        .stat .num small { font-size: 14px; color: var(--muted); font-weight: 500; }
+        .stat .num small { font-size: 14px; color: var(--muted); font-weight: 500; white-space: nowrap; }
         .stat.up .num { color: var(--up); }
         .stat.down .num { color: var(--down); }
 
@@ -710,6 +710,7 @@
         body.cover, body.cover .gate h1 { color: #F3F0F9; }
         body.cover .gate .wordmark { color: #FFFFFF; }
         body.cover .gate p { color: #D8D2E6; }
+        body.cover .gate .fineprint { color: rgba(255, 255, 255, .55); }
         body.cover footer { color: rgba(255, 255, 255, .5); }
         @media (max-width: 560px) {
             body.cover { background-attachment: scroll; }
@@ -960,9 +961,17 @@
                 const node = [...tile.childNodes].find(
                     (n) => n.nodeType === Node.TEXT_NODE && n.textContent.trim());
                 if (!node) return;
-                const shape = SHAPE.exec(node.textContent.trim());
+                const raw = node.textContent;
+                const shape = SHAPE.exec(raw.trim());
                 if (!shape) return;
                 const [, prefix, digits, suffix] = shape;
+                // The space separating the value from a trailing <small> ("net",
+                // "/ $21 ARPU") lives at the end of THIS text node, and it is
+                // also the only place the line may break. Matching on the
+                // trimmed string and then writing the trimmed string back
+                // deleted it, so the suffix ran into the number and a
+                // four-figure value pushed it out of the tile.
+                const gap = /\s$/.test(raw) ? " " : "";
                 const target = parseFloat(digits.replace(/,/g, ""));
                 if (!isFinite(target) || target === 0) return;
                 const decimals = (digits.split(".")[1] || "").length;
@@ -970,7 +979,7 @@
                     minimumFractionDigits: decimals,
                     maximumFractionDigits: decimals,
                     useGrouping: digits.includes(","),
-                }) + suffix;
+                }) + suffix + gap;
 
                 const started = performance.now(), duration = 620;
                 const frame = (now) => {

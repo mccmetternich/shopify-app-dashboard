@@ -33,9 +33,11 @@
 {% set m = METRICS[key] %}
 <div class="card stat{% if tone %} {{ tone }}{% endif %}">
     <div class="label">{{ m.name }} {{ defn(key) }}</div>
-    {#- The nbsp lives here rather than in the caller's string: passed in, Jinja
-        would escape the entity and the tile would read "&nbsp;/ $19 ARPU". -#}
-    <div class="num">{{ value }}{% if extra %}<small>&nbsp;{{ extra }}</small>{% endif %}</div>
+    {#- Ordinary space outside the <small>, not an nbsp inside it. The nbsp made
+        "$1262.28 net" one unbreakable token, so a four-figure value pushed the
+        suffix straight out of the tile instead of wrapping. The suffix keeps
+        its own nowrap in CSS, so "/ $19 ARPU" still moves as one piece. -#}
+    <div class="num">{{ value }} {% if extra %}<small>{{ extra }}</small>{% endif %}</div>
     {% if compare %}
     {#- Direction is only good or bad news when the metric says which way is
         which. Uninstalls going up is not an achievement, and nothing here
