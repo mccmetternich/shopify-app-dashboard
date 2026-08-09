@@ -81,6 +81,12 @@ looks wrong next to the others.
   do nothing.
 - **Any new inline `<script>` needs `nonce="{{ request.state.nonce }}"`** or the CSP in
   `security.py` blocks it silently: blank page, console-only error.
+- **`/customers/{shop_domain}.md` is registered before the HTML route on purpose.** A path parameter
+  compiles to a greedy `[^/]+`, so the other way round the `.md` URL is served as a shop literally
+  named `x.myshopify.com.md`. Pinned by a test.
+- **Animate the mark, never the container.** No element holding content may start at `opacity: 0`,
+  and there is no `IntersectionObserver`. If the animation never runs, the page must still look
+  finished.
 - **`POST /ingest/usage` is the only route without interactive auth.** Three things in that path
   look simplifiable and are not: the dedupe key is scoped `(shop_gid, event_id)` rather than global,
   it is `ON CONFLICT DO NOTHING` rather than `DO UPDATE`, and event names are whitelisted. Changing

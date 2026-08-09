@@ -107,3 +107,17 @@ python -m app_dashboard.import_shops_csv shops path/to/export.csv
 
 Retitle `COLUMN_MAP` in `src/app_dashboard/import_shops_csv.py` to match your export's header first. It is
 update-only and never touches install state, so it is safe to re-run.
+
+It deliberately maps no contact columns. See `migrations/008_drop_bad_contacts.sql` for why: those
+columns list every staff account on the shop, which on an app installed by agencies means mostly
+agencies, and a column headed "who to write to" that names somebody else's agency is worse than a
+blank one.
+
+## Marking a reviewer
+
+Nothing in the Partner API reports reviews, so `shops.reviewed_at` is hand-maintained and the "Ask
+for a review" call sheet is only ever as good as it is kept:
+
+```sql
+update shops set reviewed_at = '2026-01-15' where shop_domain = 'example.myshopify.com';
+```

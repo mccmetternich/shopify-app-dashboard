@@ -75,6 +75,9 @@ which table to read, not what the number means.
 
 ## Traps, each with the symptom that reveals it
 
+These are traps in *this code*. For what the Partner API itself does, which is the cause of about
+half of them, see [partner-api-notes.md](partner-api-notes.md).
+
 **Shopify mints a new subscription gid on a plan change.** It does not edit an `AppSubscription`; it
 activates a new one and cancels the old. In the feed that reads `subscribed → upgraded →
 unsubscribed`, usually within a day, and both are briefly live at once.
@@ -207,5 +210,9 @@ it will not run.
 | `src/app_dashboard/static/` | the three error illustrations, and nothing else |
 | `src/app_dashboard/migrations/` | numbered, idempotent, run on deploy by `app_dashboard.migrate` |
 | `scripts/check_invariants.py` | the invariants against a live database |
-| `docs/deploy.md` | deploy and secrets |
+| `scripts/seed_demo.py` | a synthetic dataset, written through the real ingest and derivation path |
+| `docs/configuration.md` | the settings that decide whether the numbers are right |
+| `docs/partner-api-notes.md` | what the Partner API actually does, as opposed to what it looks like it does |
+| `docs/deploy.md` | deploy, secrets, replay, backfills |
+| `docs/exports.md` | the `.md` twins and `/export.json` |
 | `docs/usage-events-integration.md` | the `POST /ingest/usage` contract, to hand to your app developer |

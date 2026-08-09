@@ -14,9 +14,6 @@ churn, and activation.
 > with, endorsed by, sponsored by, or connected to Shopify Inc.** Nobody at Shopify has reviewed it.
 > "Shopify" appears in the name only to say which API it reads, in the sense the law calls
 > nominative use. Shopify, Shopify Partners and the Shopify App Store are trademarks of Shopify Inc.
->
-> Everything below describing how the Partner API behaves is a field note from one app's traffic,
-> not documentation and not a promise. Shopify can change any of it without telling either of us.
 
 ![The Overview page](docs/screenshots/overview.png)
 
@@ -46,6 +43,64 @@ revenue figure appears anywhere in this repository, in the screenshots, or in th
 - **A `.md` twin of every page** with a Copy button, and `/export.json` for the whole thing at once.
 - **Slack** stale-sync alerts and a weekly digest.
 
+## Install
+
+Requires Python 3.13, Postgres, and a Shopify Partner API token.
+
+### With Claude Code
+
+Paste this into [Claude Code](https://claude.com/claude-code) from the directory you want it in. It
+asks you for the things it cannot know instead of inventing them, which for this app is the
+difference between a correct dashboard and a confidently wrong one:
+
+```text
+Set up https://github.com/kgelster/shopify-app-dashboard for my Shopify app.
+
+Clone it, then read README.md and docs/configuration.md before doing anything else.
+
+Work through this in order, and stop to ask me rather than guessing at any value:
+
+1. `uv sync`, then create the Postgres database and tell me the DATABASE_URL you used.
+2. Ask me for my Partner org id and app id. Walk me through creating a Partner API
+   token at partners.shopify.com/<org-id>/settings/partner_api_clients (that slug, not
+   api_clients) and wait for me to paste it back.
+3. Ask me every price I charge, including annual ones with cents, then set
+   ANNUAL_PLAN_AMOUNTS to just the annual ones. Explain to me what happens if it is
+   wrong before you write it.
+4. Ask me what my app's core "the merchant actually used it" action is, and set
+   USAGE_EVENT_TYPES, USAGE_ACTIVATION_EVENT and USAGE_LIVE_EVENT from that answer.
+5. Write .env from .env.example, generate a SESSION_SECRET, and confirm .env is
+   gitignored. Never commit it and never print the Partner token back to me.
+6. Run the migrations, start the app, and tell me when the first sync has finished.
+   It replays my app's full history, so it takes a few minutes.
+7. Run scripts/check_invariants.py and show me the output. If anything fails, stop and
+   explain which invariant and what it means before touching anything.
+
+Then tell me which numbers on the Overview page you would not trust yet, and why.
+```
+
+### By hand
+
+```bash
+uv sync
+cp .env.example .env        # fill in real values, never commit this file
+createdb app_dashboard
+uv run python -m app_dashboard.migrate
+uv run uvicorn app_dashboard.web:app --reload
+```
+
+Read [docs/configuration.md](docs/configuration.md) before the first run. Three settings decide
+whether the numbers are right, and `ANNUAL_PLAN_AMOUNTS` in particular will silently report annual
+subscribers at twelve times their real MRR if you leave it unset.
+
+The first sync replays your app's full history from the events feed, so there is no historical
+import to arrange.
+
+### Without a Partner token
+
+`scripts/seed_demo.py` builds the synthetic dataset in the screenshots below, so you can see the
+whole thing before deciding whether to wire up your own app. Its docstring has the invocation.
+
 ## What it looks like
 
 All synthetic, from `scripts/seed_demo.py`.
@@ -74,8 +129,8 @@ healthy on one while dying on the other.
 The whole lifecycle in one place. This one shows the trap that costs the most money: Shopify does
 not edit a subscription when a merchant changes plan, it activates a **new** `AppSubscription` and
 cancels the old one, which is why the timeline reads "Upgraded" and "Subscription ended" on the same
-day. It also shows an annual plan being normalised to `$15.83 a month in MRR`, and what Shopify
-actually kept out of each charge, measured per transaction rather than assumed to be 2.9%.
+day. It also shows an annual plan normalised to `$15.83 a month in MRR`, and what Shopify actually
+kept out of each charge, measured per transaction rather than assumed to be 2.9%.
 
 ![A single merchant's detail page](docs/screenshots/customer.png)
 
@@ -111,254 +166,39 @@ out the cookie it already issued.
 
 ![The sign-in page](docs/screenshots/signin.png)
 
-## Requirements
+## Documentation
 
-Python 3.13, Postgres, and a Shopify Partner API token. Optionally a Google OAuth client for
-sign-in, a GA4 property for listing traffic, and a Slack webhook.
-
-## Quickstart, against your own app
-
-```bash
-uv sync
-cp .env.example .env        # fill in real values, never commit this file
-createdb app_dashboard
-uv run python -m app_dashboard.migrate
-uv run uvicorn app_dashboard.web:app --reload
-```
-
-Create the Partner API token at
-`partners.shopify.com/<your-org-id>/settings/partner_api_clients` (note the slug is
-`partner_api_clients`, not `api_clients`; the org id is the number in that URL).
-
-The first sync replays your app's full history from the events feed, so there is no historical
-import to arrange. It takes a few minutes on a long-lived app.
-
-## Configuration
-
-Everything is environment variables; `.env.example` is the complete list with notes. The ones that
-are required and have no default are `DATABASE_URL`, `PARTNER_API_TOKEN`, `PARTNER_ORG_ID`,
-`PARTNER_APP_ID`, `DASHBOARD_USERS`, `PUBLIC_BASE_URL`, and `GOOGLE_ALLOWED_DOMAINS`. The last two
-have no default deliberately: a default there would point every deployment at whoever published it
-and admit their staff.
-
-Three settings decide whether the numbers are right, so they are worth reading twice:
-
-| Var | Why it matters |
-| --- | --- |
-| `ANNUAL_PLAN_AMOUNTS` | `AppSubscription` carries no billing-interval field, so annual plans are recognised **by price**. List every annual price you charge, with cents. An unlisted annual price is treated as monthly and counted at **twelve times** its true MRR, with nothing on any page to say so. Empty (the default) means every plan is monthly; the app logs a warning at startup. Changing it later does not fix stored charges; see [forcing a full replay](#operating-it). |
-| `USAGE_EVENT_TYPES` | The event names `POST /ingest/usage` accepts. Anything else is rejected rather than stored. The defaults use "offer" nouns; rename them to whatever your app does. |
-| `TRUSTED_CLIENT_IP_HEADER` | The header your proxy puts the real client address in. Rate limiting keys on it, so leaving it wrong collapses every caller into one bucket. Prefer a single-value header your proxy *overwrites* (`Fly-Client-IP`, `CF-Connecting-IP`, `X-Real-IP`). `X-Forwarded-For` works, but proxies append to it, so only its rightmost entry is trustworthy, and that is the one read. Empty means trust the socket peer, correct only with nothing in front. |
-
-`POLL_INTERVAL_MINUTES` also carries more weight than it looks: the ops-strip red threshold and the
-stale-sync Slack alert are multiples of it (3 and 4 polls), so raising it moves them too.
-
-## Deploy
-
-There is a `Dockerfile` and a `fly.toml`. Nothing is Fly-specific in the application, but two
-constraints are real wherever you run it:
-
-- **One instance.** Two means two APScheduler instances, so duplicate polls and duplicate Slack
-  alerts. `fly.toml` pins `min_machines_running`/`max` accordingly.
-- **Run migrations on release.** `python -m app_dashboard.migrate` is idempotent and is wired as the
-  `release_command`.
-
-Set every secret before the first deploy. Required settings have no defaults, so a missing one is a
-startup `ValidationError` rather than a subtly wrong dashboard, which is the intended trade.
-
-## How it works
-
-Read [`docs/architecture.md`](docs/architecture.md) before changing `derive.py` or `stats.py`. It
-holds the pipeline map, the source-of-truth table, and the traps.
-
-The short version: `raw_app_events` is an append-only mirror of the Partner API feed, `derive.py`
-replays it into `shops` / `app_events` / `subscriptions`, and `stats.py` only ever reads. Derivation
-is a **full replay, not an incremental apply**, so any change to derive logic rewrites history the
-next time a shop is touched.
-
-Per-number definitions live in `src/app_dashboard/metrics.py`, not in any document. The tiles and the `.md`
-twins both read that registry. Add a metric there or its definition will not exist anywhere.
-`src/app_dashboard/faq.py` is the same idea for the why-don't-these-match answers, rendered at `/faq`.
-
-### Things the Partner API will get you wrong
-
-These cost real debugging, all verified live against the 2026-07 API:
-
-- **`shopifyFee` is not the fee.** It is Shopify's *revenue share*, which is 0% on the first $1M of
-  lifetime revenue since 2025-01-01, so it reads `$0.00` on most rows. The billing processing fee
-  appears *only* in the gap between `grossAmount` and `netAmount`. `gross - shopifyFee = net` is
-  false. Every "what Shopify took" figure is `gross - net`.
-- **That deduction is not a flat rate.** Identically priced charges settle at 2.895%, 4.895% and
-  5.895% depending on the merchant. Read it per transaction; never calculate it.
-- **`AppSubscription` has no billing interval.** Hence `ANNUAL_PLAN_AMOUNTS`. The one place the API
-  states it outright is `AppSubscriptionSale.billingInterval` on a transaction, which
-  `customer_detail` falls back to.
-- **Shopify mints a new `AppSubscription` on a plan change** and cancels the old one
-  (`subscribed → upgraded → unsubscribed`, both briefly live). Tracking a running total instead of
-  per-subscription-id is wrong in both directions. It also does not guarantee a cancel event when a
-  shop uninstalls, so derivation churns whatever is still live at that point.
-- **`Transaction` is a GraphQL interface, not a union**, so `id` and `createdAt` are selectable on
-  the node and only per-type fields need inline fragments.
-- **Refunds arrive only as transactions**, never as app events. A dashboard reading only the events
-  feed is blind to money coming back out.
-- **`RELATIONSHIP_DEACTIVATED`** (store closed or frozen by Shopify) folds into type `uninstalled`.
-  Those merchants are never shown the exit survey, so any "share who gave a reason" figure must
-  exclude them or it understates coverage.
-- **Uninstall reasons arrive localised** to the merchant's admin language.
-  `src/app_dashboard/uninstall_reasons.py` maps the observed strings onto canonical buckets; unknown strings
-  fall to "Unclassified" and are logged rather than vanishing into "Other".
-- **The API 429s readily.** Paging is throttled to 0.3s per call.
-
-### The uninstall-reason era boundary
-
-Shopify made the exit question mandatory partway through 2026. Coverage either side is wildly
-different, so pooling the two eras produces an average of two different questions that describes
-neither. `REASON_MANDATORY_FROM` splits them. Read the right date off your own feed: it is the day
-after your last uninstall with an empty reason.
-
-## Markdown mirrors and the JSON export
-
-Every page has a `.md` twin at the same path (`/index.md`, `/customers.md`, `/reports/churn.md`),
-behind the same auth. YAML frontmatter, prose explaining what each number means, then the data as
-fenced JSON. The Copy MD button puts the current page's twin on the clipboard, so a page can be
-pasted into an agent as one prompt. Query params carry through:
-`/customers.md?install_state=uninstalled` exports that filter.
-
-Two rules hold in `markdown_export.py`, both tested: **no merchant contact details**, and **every
-footnote caveat from the page is repeated in the prose** (a model that does not know deactivations
-are folded into uninstalls will confidently report the wrong churn number).
-
-`GET /export.json` is the whole dashboard as one file, and is deliberately not a twin:
-
-- **Widest window, not the reader's window.** A twin honours `?days=`; this takes the lot.
-- **No silent truncation.** Display defaults in `stats.py` are overridden by `export.LIMITS`, which
-  is written into `meta.windows` so a reader can tell a real end from a ceiling.
-- **Unknown is `null` with a `note`, never `0`.** An empty activation list would read as "nobody
-  activated", which is a much better story than the truth.
-
-## Backfilling country and industry
-
-The Partner API does not expose merchant location or industry. If you are migrating off a vendor
-that did, `import_shops_csv` fills those columns from a CSV, matched on myshopify domain:
-
-```bash
-python -m app_dashboard.import_shops_csv shops path/to/export.csv
-```
-
-Update-only: shop rows are created by derivation with a Partner shop GID primary key, so export rows
-with no matching shop are logged and skipped. It never touches install state. Retitle `COLUMN_MAP`
-to match your export's header.
-
-It deliberately does not map contact columns. See `migrations/008_drop_bad_contacts.sql` for why:
-those columns list every staff account on the shop, which on an app installed by agencies means
-mostly agencies, and a column headed "who to write to" that names somebody else's agency is worse
-than a blank.
-
-## Operating it
-
-**Forcing a full replay.** `sync_state.cursor` persists, so a normal poll only fetches events newer
-than the cursor. Any change that widens the GraphQL query or corrects a stored value needs history
-replayed, or the deploy will appear to do nothing:
-
-```sql
-update sync_state set cursor = null where source = 'partner_api';
-```
-
-Then restart the app; the scheduler syncs at boot. Safe and repeatable: `raw_app_events` dedupes on
-its unique key, derivation is idempotent, and Slack does not re-alert because replayed events keep
-their existing `app_events.id`.
-
-**Marking a reviewer.** Nothing in the Partner API reports reviews, so `shops.reviewed_at` is
-hand-maintained and the "Ask for a review" list is only as good as it is:
-
-```sql
-update shops set reviewed_at = '2026-01-15' where shop_domain = 'example.myshopify.com';
-```
-
-**Checking the data.** `scripts/check_invariants.py` runs 14 read-only invariants against any
-`DATABASE_URL` and exits non-zero on failure, so it can gate a deploy:
-
-```bash
-DATABASE_URL=... uv run python scripts/check_invariants.py
-```
-
-The same invariants run in the test suite as `tests/test_invariants.py`.
-
-## Usage events
-
-The Partner API knows lifecycle only: installed, paid, left. It has no idea whether a merchant ever
-configured anything, so "installed but never activated" is invisible from that side.
-`POST /ingest/usage` closes that gap. Hand
-[`docs/usage-events-integration.md`](docs/usage-events-integration.md) to whoever writes your app.
-
-Until events arrive, activation reports read **unknown, not 0%**. A shop that installed before
-tracking started has no activation event to find.
-
-## Tests
-
-```bash
-createdb app_dashboard_test
-uv run pytest
-```
-
-Tests need a real Postgres to run migrations against; `tests/conftest.py` sets everything else,
-including a dummy required-settings block, so a fresh clone runs green. `DATABASE_URL` is the one
-value it does not override. The `db` fixture truncates every table except `schema_migrations` before
-each test, so the same database persists across runs.
-
-## Layout
-
-- `src/app_dashboard/web.py` : `create_app(conn_factory)`. `verify_creds` (Google session first, Basic auth
-  second, both constant-time) gates every route except `GET /healthz`.
-  **`/customers/{shop_domain}.md` is registered before the HTML route on purpose**: a path parameter
-  compiles to a greedy `[^/]+`, so the other way round the `.md` URL is served as a shop literally
-  named `x.myshopify.com.md`. Pinned by a test.
-- `src/app_dashboard/partner_api.py` : the GraphQL client. `API_VERSION` is the version every query is
-  written against.
-- `src/app_dashboard/pipeline.py` / `derive.py` : ingest and replay.
-- `src/app_dashboard/stats.py` : every read-side aggregate. `customers.py` is the Customers list and detail
-  page, and deliberately never selects `owner_name` or `email`.
-- `src/app_dashboard/metrics.py` / `faq.py` / `ranges.py` : the definition registry, the FAQ, and the
-  allowlist behind every time-range control (shared by the pages and the twins, so a window one
-  honours cannot be one the other ignores).
-- `src/app_dashboard/security.py` : response headers, CSP, rate limiter. **Any new inline `<script>` in a
-  template needs `nonce="{{ request.state.nonce }}"`** or the CSP blocks it silently.
-- `src/app_dashboard/templates/` : Jinja2. `base.html` is the shell. Signed-out surfaces share `gate.html`,
-  which empties the sidebar block, because a nav full of links you cannot follow is worse than none.
-  `error.html` renders for 401/403/404 **only when the request accepts HTML**, so the `.md` twins and
-  curl keep the JSON body; a rendered 401 keeps `WWW-Authenticate` or `curl -u` stops working.
-  **Animation rule: animate the mark, never the container.** No element holding content may start at
-  `opacity: 0`, and there is no `IntersectionObserver`. If the animation never runs the page must
-  still look finished.
-- `src/app_dashboard/migrations/` : plain numbered `.sql`, applied in filename order, tracked in
-  `schema_migrations`.
-- `scripts/check_invariants.py` : 14 read-only checks, exits non-zero, safe against production.
-  `scripts/seed_demo.py` : the synthetic dataset in the screenshots. It goes through
-  `upsert_raw_events` / `upsert_charges` / `upsert_transactions` and then `derive_installation`
-  rather than writing derived rows itself, so it cannot produce a dashboard the real pipeline
-  could not. It truncates every table it seeds and refuses to run without `--yes`.
-- `docs/screenshots/` : the images in this README, all synthetic.
+| | |
+|---|---|
+| [docs/configuration.md](docs/configuration.md) | Every setting that can make the numbers wrong. Read before the first run. |
+| [docs/partner-api-notes.md](docs/partner-api-notes.md) | What the Partner API actually does. Field notes, each one paid for. |
+| [docs/architecture.md](docs/architecture.md) | The pipeline, which table is the truth for which number, and the traps. Read before changing `derive.py` or `stats.py`. |
+| [docs/deploy.md](docs/deploy.md) | Secrets, deploy, verification, forcing a replay, backfills. |
+| [docs/exports.md](docs/exports.md) | The `.md` twin of every page, and `/export.json`. |
+| [docs/usage-events-integration.md](docs/usage-events-integration.md) | The `POST /ingest/usage` contract. Hand this to whoever writes your app. |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Running the tests, and what is likely to be merged. |
 
 ## Scope
 
-This is what we run for our own app. It was built because Mantle shut down and the replacement
-had to exist; publishing it costs nothing and it may save someone else the same build. It works; it
-is not a product.
+This is what we run for our own app. It was built because Mantle shut down and the replacement had
+to exist; publishing it costs nothing and it may save someone else the same build. It is
+deliberately one Partner org, one app, one Postgres, one machine, with opinions where a product
+would have settings. It works; it is not a product.
 
 **No support is promised, and that is not modesty.** Issues and pull requests are welcome and may
-sit for a while. Nobody is on call. There is no roadmap, no deprecation policy, and no reason to
-expect a reply within any particular month. If you need something to depend on, fork it: MIT, and
-the fork is yours.
+sit for a while. Nobody is on call. There is no roadmap and no deprecation policy. If you need
+something to depend on, fork it: MIT, and the fork is yours.
 
 What would actually help, in rough order: a new uninstall-reason string Shopify has started serving
 (`src/app_dashboard/uninstall_reasons.py`, and unmapped ones are logged rather than hidden, so
-`grep` your logs), a Partner API behaviour that contradicts something in this README, and a bug with
-a failing test. See [CONTRIBUTING.md](CONTRIBUTING.md).
+`grep` your logs), a Partner API behaviour that contradicts
+[docs/partner-api-notes.md](docs/partner-api-notes.md), and a bug with a failing test.
 
 ## License and trademarks
 
 MIT. See [LICENSE](LICENSE).
 
 Shopify, Shopify Partners, and the Shopify App Store are trademarks of Shopify Inc. This project is
-not affiliated with, endorsed by, or sponsored by Shopify Inc., and the MIT licence covers this
-code only, never anyone's trademarks. If you fork this and put a name on it, that name is your
-problem to get right.
+not affiliated with, endorsed by, or sponsored by Shopify Inc., and the MIT licence covers this code
+only, never anyone's trademarks. If you fork this and put a name on it, that name is your problem to
+get right.
