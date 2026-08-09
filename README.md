@@ -56,27 +56,33 @@ difference between a correct dashboard and a confidently wrong one:
 ```text
 Set up https://github.com/kgelster/shopify-app-dashboard for my Shopify app.
 
-Clone it, then read README.md and docs/configuration.md before doing anything else.
+Clone it, then read README.md and docs/configuration.md first.
 
-Work through this in order, and stop to ask me rather than guessing at any value:
+Work through this in order. Stop and ask me rather than guessing at any
+value:
 
-1. `uv sync`, then create the Postgres database and tell me the DATABASE_URL you used.
-2. Ask me for my Partner org id and app id. Walk me through creating a Partner API
-   token at partners.shopify.com/<org-id>/settings/partner_api_clients (that slug, not
-   api_clients) and wait for me to paste it back.
+1. `uv sync`, then create the Postgres database and tell me the
+   DATABASE_URL you used.
+2. Ask me for my Partner org id and app id, then walk me through creating a
+   Partner API token at
+   partners.shopify.com/<org-id>/settings/partner_api_clients
+   (that slug, not api_clients) and wait for me to paste it back.
 3. Ask me every price I charge, including annual ones with cents, then set
-   ANNUAL_PLAN_AMOUNTS to just the annual ones. Explain to me what happens if it is
-   wrong before you write it.
-4. Ask me what my app's core "the merchant actually used it" action is, and set
-   USAGE_EVENT_TYPES, USAGE_ACTIVATION_EVENT and USAGE_LIVE_EVENT from that answer.
-5. Write .env from .env.example, generate a SESSION_SECRET, and confirm .env is
-   gitignored. Never commit it and never print the Partner token back to me.
-6. Run the migrations, start the app, and tell me when the first sync has finished.
-   It replays my app's full history, so it takes a few minutes.
-7. Run scripts/check_invariants.py and show me the output. If anything fails, stop and
-   explain which invariant and what it means before touching anything.
+   ANNUAL_PLAN_AMOUNTS to just the annual ones. Explain what happens if it
+   is wrong before you write it.
+4. Ask me what my app's core "the merchant actually used it" action is,
+   and set USAGE_EVENT_TYPES, USAGE_ACTIVATION_EVENT and USAGE_LIVE_EVENT
+   from that answer.
+5. Write .env from .env.example, generate a SESSION_SECRET, and confirm
+   .env is gitignored. Never commit it, never print the token back to me.
+6. Run the migrations, start the app, and tell me when the first sync is
+   done. It replays my app's full history, so it takes a few minutes.
+7. Run scripts/check_invariants.py and show me the output. If anything
+   fails, stop and explain which invariant and what it means before
+   touching anything.
 
-Then tell me which numbers on the Overview page you would not trust yet, and why.
+Then tell me which numbers on the Overview page you would not trust yet,
+and why.
 ```
 
 ### By hand
