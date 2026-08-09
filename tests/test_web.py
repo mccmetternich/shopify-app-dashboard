@@ -287,6 +287,26 @@ def test_login_is_a_page_that_explains_the_dashboard(db):
         assert leak not in r.text, leak
 
 
+def test_unauthenticated_pages_disclaim_affiliation_with_shopify(db):
+    """The sign-in screen and the error screens are the only surfaces a stranger
+    reaches on a deployment that is on a real hostname, so they are the ones
+    that have to say this is not Shopify's. Pinned by a test because a template
+    tidy-up would otherwise drop it silently, and the reason it exists is not
+    visible from the markup."""
+    app = create_app(conn_factory=lambda: db)
+    c = TestClient(app)
+    for path in ("/auth/login", "/no-such-page"):
+        # Collapsed, so reflowing the template's source lines cannot break the
+        # assertion on a phrase that is still on the page.
+        text = " ".join(c.get(path, headers={"accept": "text/html"}).text.split())
+        assert "Not affiliated with, endorsed by, or a product of Shopify." in text, path
+        assert "is a trademark of Shopify Inc." in text, path
+
+    # Signed in, it is gone: the operator installed this and knows whose it is.
+    assert "Not affiliated with" not in c.get(
+        "/", auth=("tester", "suite-only-credential")).text
+
+
 def test_google_redirect_moved_to_its_own_route(db):
     app = create_app(conn_factory=lambda: db)
     c = TestClient(app)

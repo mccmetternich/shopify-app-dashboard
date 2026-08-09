@@ -12,8 +12,19 @@ been removed.
   `GOOGLE_ALLOWED_DOMAINS` became required with no default.
 - The rate limiter read a hardcoded `Fly-Client-IP`. Behind any other proxy that meant every caller
   shared one bucket, so it limited nothing. It now reads only the header named by
-  `TRUSTED_CLIENT_IP_HEADER`, takes the leftmost entry of a forwarded chain, and falls back to the
-  socket peer when unset.
+  `TRUSTED_CLIENT_IP_HEADER`, takes the **rightmost** entry of a forwarded chain, and falls back to
+  the socket peer when unset. Rightmost because proxies *append*: everything to the left of the last
+  hop was written by the client and can say anything, so keying on it lets one caller spend
+  everyone's budget or spread its own across an unlimited number of buckets.
+- **`scripts/seed_demo.py`**, a synthetic dataset so the dashboard can be run with no Partner token.
+  Invented merchants, `demo-` prefixed domains, and Shopify's own published uninstall-reason strings
+  including the localised ones. It goes through the real ingest and derivation path, so it cannot
+  produce a state the live pipeline could not; all 14 invariants pass against it.
+- Screenshots in the README, generated from that seeder.
+- The affiliation disclaimer now renders on every unauthenticated surface, not just in the README.
+- A stat tile whose value ran to four figures pushed its suffix outside the card. The separator was a
+  non-breaking space, so `$1262.28 net` was one unbreakable token, and the count-up animation was
+  writing back a trimmed string that deleted the separator entirely.
 - **Upgrading an existing deployment:** the package is now `app_dashboard` rather than `ppa`, so
   the ASGI target is `app_dashboard.web:app` and the release command is
   `python -m app_dashboard.migrate`. `PPA_NO_SCHEDULER` is now `NO_SCHEDULER`. The session cookie

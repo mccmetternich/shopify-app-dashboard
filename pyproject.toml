@@ -1,7 +1,7 @@
 [project]
 name = "shopify-app-dashboard"
 version = "0.1.0"
-description = "Self-hosted analytics for your own Shopify app, from the Partner API"
+description = "Unofficial self-hosted analytics for your own Shopify app, from the Partner API. Not affiliated with Shopify Inc."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.13,<3.14"

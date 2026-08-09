@@ -27,5 +27,14 @@
     </a>
     {% endif %}
     {% block gate %}{% endblock %}
+    {%- if not signed_in %}
+    {#- The only surface an unauthenticated visitor reaches, and the deployment
+        is on a real public hostname, so this is where the affiliation has to be
+        disclaimed. Signed-in pages do not repeat it: the operator installed
+        this and knows whose it is. -#}
+    <p class="fineprint">An independent, self-hosted dashboard. Not affiliated with,
+    endorsed by, or a product of Shopify. &ldquo;Shopify&rdquo; is a trademark of
+    Shopify Inc.</p>
+    {%- endif %}
 </div>
 {% endblock %}

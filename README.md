@@ -1,16 +1,78 @@
 # Shopify App Dashboard
 
-A self-hosted analytics dashboard for your own Shopify app. It polls the Shopify Partner API and
-derives installs, uninstalls with reasons, MRR and what moved it, collected revenue, cohort
-retention, churn, and activation.
+Self-hosted analytics for your own Shopify app. It polls the Shopify Partner API and derives
+installs, uninstalls with reasons, MRR and what moved it, collected revenue, cohort retention,
+churn, and activation.
 
-Built to replace [Mantle](https://docs.heymantle.com/wind-down) when it shut down in August 2026.
-Almost everything Mantle held is re-derivable from the Partner API, including uninstall reasons,
-which are a native `RelationshipUninstalled` field rather than a vendor exclusive. The one thing
-that is not is App Store listing traffic, which the Partner API does not expose at all; this reads
-that from GA4 instead.
+[![CI](https://github.com/kgelster/shopify-app-dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/kgelster/shopify-app-dashboard/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.13](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/downloads/)
 
-It is opinionated on purpose: one Partner org, one app, one Postgres, one machine. Not a platform.
+> ## Unofficial. Not a Shopify product.
+>
+> This is an independent project by an app developer, for app developers. It is **not affiliated
+> with, endorsed by, sponsored by, or connected to Shopify Inc.** Nobody at Shopify has reviewed it.
+> "Shopify" appears in the name only to say which API it reads, in the sense the law calls
+> nominative use. Shopify, Shopify Partners and the Shopify App Store are trademarks of Shopify Inc.
+>
+> Everything below describing how the Partner API behaves is a field note from one app's traffic,
+> not documentation and not a promise. Shopify can change any of it without telling either of us.
+
+![The Overview page](docs/screenshots/overview.png)
+
+## It is in use on a real app
+
+This is the dashboard behind [Promo Party](https://apps.shopify.com/promo-party-fgwp), a live app in
+the Shopify App Store, and it is the one its developers actually open. One Fly machine, one
+Postgres, polling the Partner API every 15 minutes, serving a real hostname since August 2026, when
+[Mantle](https://docs.heymantle.com/wind-down) shut down and the replacement had to exist.
+
+That matters in two directions, and only one of them is flattering:
+
+- **Every trap in [Things the Partner API will get you wrong](#things-the-partner-api-will-get-you-wrong)
+  was paid for.** Each one is a bug that shipped, reported a wrong number for a while, and was found
+  against a live app with real money in it. That list is the most valuable thing in this repository.
+- **It is shaped like one app's problem.** One Partner org, one app, one Postgres, one machine, and
+  opinions where a product would have settings. Not a platform, and not trying to be.
+
+**The screenshots are not that app.** They come from `scripts/seed_demo.py`, which invents an app
+called Demo App and about two hundred fictional merchants. No real merchant, domain, contact or
+revenue figure appears anywhere in this repository, in the screenshots, or in the git history.
+
+## Try it in about a minute
+
+No Partner token needed. This builds the dataset in every screenshot on this page:
+
+```bash
+uv sync
+createdb app_dashboard_demo
+
+export DATABASE_URL=postgresql://localhost:5432/app_dashboard_demo
+export PARTNER_API_TOKEN=unused PARTNER_ORG_ID=0 PARTNER_APP_ID=0
+export DASHBOARD_USERS=demo:demo-only-not-a-password
+export PUBLIC_BASE_URL=http://localhost:8000 GOOGLE_ALLOWED_DOMAINS=example.com
+export ANNUAL_PLAN_AMOUNTS=190.00 APP_NAME="Demo App" GA4_PROPERTY_ID=000000000
+export NO_SCHEDULER=1
+
+uv run python scripts/seed_demo.py --yes
+uv run uvicorn app_dashboard.web:app --reload
+```
+
+Then open <http://localhost:8000> and sign in with `demo` / `demo-only-not-a-password`.
+
+The seeder writes through the same functions the live pipeline uses and then replays derivation, so
+what you get is a dashboard the real code path can actually produce rather than a mock-up.
+`scripts/check_invariants.py` passes against it, all fourteen, which is the check that it is
+consistent and not merely plausible-looking:
+
+```bash
+uv run python scripts/check_invariants.py
+```
+
+`ANNUAL_PLAN_AMOUNTS=190.00` in there is not decoration. Drop it and the demo's annual plan is
+counted as monthly, at twelve times its real MRR, on every page and with nothing to say so. That is
+the single easiest way to make this dashboard lie, which is why the seeder refuses to run without
+it.
 
 ## What it gives you
 
@@ -27,12 +89,77 @@ It is opinionated on purpose: one Partner org, one app, one Postgres, one machin
 - **A `.md` twin of every page** with a Copy button, and `/export.json` for the whole thing at once.
 - **Slack** stale-sync alerts and a weekly digest.
 
+## What it looks like
+
+All synthetic, from `scripts/seed_demo.py`.
+
+### Churn
+
+Shopify serves the uninstall pick-list in the merchant's own admin language, so the same reason
+arrives as "Testing multiple apps", "Testen mehrerer Apps" and "現在アプリを使用していない".
+Grouping on the raw string gives you a long tail of one-off bars that says nothing. These are
+bucketed, and the two things that would otherwise quietly corrupt the percentage are called out on
+the page: stores Shopify closed (never shown the survey, so excluded) and the date the question
+became mandatory (before and after are different questions, so they are not pooled).
+
+![The Churn page](docs/screenshots/churn.png)
+
+### Retention
+
+Install cohorts and subscription cohorts, separately. A merchant who keeps paying and a merchant who
+keeps the app installed are different retention stories, and an app with a free tier can look
+healthy on one while dying on the other.
+
+![Retention cohorts](docs/screenshots/retention.png)
+
+### One merchant
+
+The whole lifecycle in one place. This one shows the trap that costs the most money: Shopify does
+not edit a subscription when a merchant changes plan, it activates a **new** `AppSubscription` and
+cancels the old one, which is why the timeline reads "Upgraded" and "Subscription ended" on the same
+day. It also shows an annual plan being normalised to `$15.83 a month in MRR`, and what Shopify
+actually kept out of each charge, measured per transaction rather than assumed to be 2.9%.
+
+![A single merchant's detail page](docs/screenshots/customer.png)
+
+### Funnel and activation
+
+The Partner API knows lifecycle only: installed, paid, left. Whether anyone ever *used* the app is
+invisible from that side, so activation is reported by the app itself through `POST /ingest/usage`.
+Until events arrive it reads unknown, never 0%.
+
+![The Funnel page](docs/screenshots/funnel.png)
+
+### Actions
+
+Three call sheets, recomputed on every page load. Nothing here writes anywhere.
+
+![The Actions page](docs/screenshots/actions.png)
+
+### Traffic
+
+The one thing the Partner API exposes nothing about: App Store listing traffic. This reads it from
+GA4 and reconciles listing installs against the installs in the events feed, which never quite
+agree.
+
+![The Traffic page](docs/screenshots/traffic.png)
+
+### Customers, and the sign-in page
+
+![The Customers list](docs/screenshots/customers.png)
+
+Sign-in is Google OAuth restricted to an allowlist you configure, with HTTP Basic as the fallback
+for whoever set it up. The allowlist is re-checked on every request, so removing an address locks
+out the cookie it already issued.
+
+![The sign-in page](docs/screenshots/signin.png)
+
 ## Requirements
 
 Python 3.13, Postgres, and a Shopify Partner API token. Optionally a Google OAuth client for
 sign-in, a GA4 property for listing traffic, and a Slack webhook.
 
-## Quickstart
+## Quickstart, against your own app
 
 ```bash
 uv sync
@@ -61,9 +188,9 @@ Three settings decide whether the numbers are right, so they are worth reading t
 
 | Var | Why it matters |
 | --- | --- |
-| `ANNUAL_PLAN_AMOUNTS` | `AppSubscription` carries no billing-interval field, so annual plans are recognised **by price**. List every annual price you charge, with cents. An unlisted annual price is treated as monthly and counted at **twelve times** its true MRR, with nothing on any page to say so. Empty (the default) means every plan is monthly; the app logs a warning at startup. Changing it later does not fix stored charges — see [forcing a full replay](#operating-it). |
+| `ANNUAL_PLAN_AMOUNTS` | `AppSubscription` carries no billing-interval field, so annual plans are recognised **by price**. List every annual price you charge, with cents. An unlisted annual price is treated as monthly and counted at **twelve times** its true MRR, with nothing on any page to say so. Empty (the default) means every plan is monthly; the app logs a warning at startup. Changing it later does not fix stored charges; see [forcing a full replay](#operating-it). |
 | `USAGE_EVENT_TYPES` | The event names `POST /ingest/usage` accepts. Anything else is rejected rather than stored. The defaults use "offer" nouns; rename them to whatever your app does. |
-| `TRUSTED_CLIENT_IP_HEADER` | The header your proxy puts the real client address in. Rate limiting keys on it, so leaving it wrong collapses every caller into one bucket. Prefer a single-value header your proxy *overwrites* (`Fly-Client-IP`, `CF-Connecting-IP`, `X-Real-IP`). `X-Forwarded-For` works, but proxies append to it, so only its rightmost entry is trustworthy — that is the one read. Empty means trust the socket peer, correct only with nothing in front. |
+| `TRUSTED_CLIENT_IP_HEADER` | The header your proxy puts the real client address in. Rate limiting keys on it, so leaving it wrong collapses every caller into one bucket. Prefer a single-value header your proxy *overwrites* (`Fly-Client-IP`, `CF-Connecting-IP`, `X-Real-IP`). `X-Forwarded-For` works, but proxies append to it, so only its rightmost entry is trustworthy, and that is the one read. Empty means trust the socket peer, correct only with nothing in front. |
 
 `POLL_INTERVAL_MINUTES` also carries more weight than it looks: the ops-strip red threshold and the
 stale-sync Slack alert are multiples of it (3 and 4 polls), so raising it moves them too.
@@ -247,6 +374,12 @@ each test, so the same database persists across runs.
   still look finished.
 - `src/app_dashboard/migrations/` : plain numbered `.sql`, applied in filename order, tracked in
   `schema_migrations`.
+- `scripts/check_invariants.py` : 14 read-only checks, exits non-zero, safe against production.
+  `scripts/seed_demo.py` : the synthetic dataset in the screenshots. It goes through
+  `upsert_raw_events` / `upsert_charges` / `upsert_transactions` and then `derive_installation`
+  rather than writing derived rows itself, so it cannot produce a dashboard the real pipeline
+  could not. It truncates every table it seeds and refuses to run without `--yes`.
+- `docs/screenshots/` : the images in this README, all synthetic.
 
 ## Scope
 
@@ -254,9 +387,21 @@ This is what we run for our own app. It was built because Mantle shut down and t
 had to exist; publishing it costs nothing and it may save someone else the same build. It works; it
 is not a product.
 
-No support is promised. Issues and pull requests are welcome and may sit for a while. If you need
-something to depend on, fork it.
+**No support is promised, and that is not modesty.** Issues and pull requests are welcome and may
+sit for a while. Nobody is on call. There is no roadmap, no deprecation policy, and no reason to
+expect a reply within any particular month. If you need something to depend on, fork it: MIT, and
+the fork is yours.
 
-## License
+What would actually help, in rough order: a new uninstall-reason string Shopify has started serving
+(`src/app_dashboard/uninstall_reasons.py`, and unmapped ones are logged rather than hidden, so
+`grep` your logs), a Partner API behaviour that contradicts something in this README, and a bug with
+a failing test. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License and trademarks
 
 MIT. See [LICENSE](LICENSE).
+
+Shopify, Shopify Partners, and the Shopify App Store are trademarks of Shopify Inc. This project is
+not affiliated with, endorsed by, or sponsored by Shopify Inc., and the MIT licence covers this
+code only, never anyone's trademarks. If you fork this and put a name on it, that name is your
+problem to get right.
