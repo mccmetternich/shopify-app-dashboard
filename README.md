@@ -47,7 +47,27 @@ revenue figure appears anywhere in this repository, in the screenshots, or in th
 
 Requires Python 3.13, Postgres, and a Shopify Partner API token.
 
+### By hand
+
+```bash
+uv sync
+cp .env.example .env        # fill in real values, never commit this file
+createdb app_dashboard
+uv run python -m app_dashboard.migrate
+uv run uvicorn app_dashboard.web:app --reload
+```
+
+Read [docs/configuration.md](docs/configuration.md) before the first run. Three settings decide
+whether the numbers are right, and `ANNUAL_PLAN_AMOUNTS` in particular will silently report annual
+subscribers at twelve times their real MRR if you leave it unset.
+
+The first sync replays your app's full history from the events feed, so there is no historical
+import to arrange.
+
 ### With Claude Code
+
+<details>
+<summary>A setup prompt that asks instead of guessing (click to expand)</summary>
 
 Paste this into [Claude Code](https://claude.com/claude-code) from the directory you want it in. It
 asks you for the things it cannot know instead of inventing them, which for this app is the
@@ -85,27 +105,23 @@ Then tell me which numbers on the Overview page you would not trust yet,
 and why.
 ```
 
-### By hand
-
-```bash
-uv sync
-cp .env.example .env        # fill in real values, never commit this file
-createdb app_dashboard
-uv run python -m app_dashboard.migrate
-uv run uvicorn app_dashboard.web:app --reload
-```
-
-Read [docs/configuration.md](docs/configuration.md) before the first run. Three settings decide
-whether the numbers are right, and `ANNUAL_PLAN_AMOUNTS` in particular will silently report annual
-subscribers at twelve times their real MRR if you leave it unset.
-
-The first sync replays your app's full history from the events feed, so there is no historical
-import to arrange.
+</details>
 
 ### Without a Partner token
 
-`scripts/seed_demo.py` builds the synthetic dataset in the screenshots below, so you can see the
-whole thing before deciding whether to wire up your own app. Its docstring has the invocation.
+`scripts/seed_demo.py` builds the synthetic dataset in the screenshots on this page, so you can
+see the whole thing before deciding whether to wire up your own app. It TRUNCATES every table it
+seeds, so point it at a throwaway database:
+
+```bash
+createdb app_dashboard_demo
+DATABASE_URL=postgresql://localhost:5432/app_dashboard_demo \
+PARTNER_API_TOKEN=unused PARTNER_ORG_ID=0 PARTNER_APP_ID=0 \
+DASHBOARD_USERS=demo:demo-only-not-a-password \
+PUBLIC_BASE_URL=http://localhost:8000 GOOGLE_ALLOWED_DOMAINS=example.com \
+ANNUAL_PLAN_AMOUNTS=190.00 NO_SCHEDULER=1 \
+  uv run python scripts/seed_demo.py --yes
+```
 
 ## What it looks like
 
