@@ -788,7 +788,8 @@ def annual_upgrade_candidates(conn: psycopg.Connection, min_months: int = 3) -> 
     ]
 
 
-def trial_watch(conn: psycopg.Connection, days: int = 14) -> list[dict]:
+def trial_watch(conn: psycopg.Connection, days: int = 14,
+                now: datetime | None = None) -> list[dict]:
     """Recently installed, still not paying. Oldest first, because the ones
     closest to the end of the window are the ones about to be lost.
 
@@ -796,19 +797,19 @@ def trial_watch(conn: psycopg.Connection, days: int = 14) -> list[dict]:
     has no product-usage data at all, so "installed and silent" is the only
     signal available today.
     """
+    now = now or datetime.now(timezone.utc)
     rows = conn.execute(
         """
         select coalesce(s.shop_name, s.shop_domain, s.shop_gid) as shop,
                s.shop_domain, s.country, s.installed_at
         from shops s
         where s.install_state = 'installed'
-          and s.installed_at >= now() - make_interval(days => %s)
+          and s.installed_at >= %s - make_interval(days => %s)
           and not exists (select 1 from subscriptions sub where sub.shop_gid = s.shop_gid)
         order by s.installed_at
         """,
-        (days,),
+        (now, days),
     ).fetchall()
-    now = datetime.now(timezone.utc)
     return [
         {"shop": shop, "domain": domain, "country": country, "installed_at": at,
          "days": (now - at).days}
