@@ -5,17 +5,18 @@
 # Rename `app` to something you own, or deploy with `fly deploy -a <your-app>`,
 # which overrides it.
 
-app = 'shopify-app-dashboard'
-primary_region = 'ord'
+app = 'densologie-scoreboard'
+primary_region = 'lax'
 
 [build]
 
 [env]
-  # How often the scheduler polls the Partner API. Non-secret, so it lives here
-  # rather than in secrets. The ops-strip red threshold and the stale-sync Slack
-  # alert are both multiples of this (3 and 4 polls), so raising it moves them
-  # with it. 30 suits an app whose numbers change daily at most.
-  POLL_INTERVAL_MINUTES = "30"
+  APP_NAME = "Densologie"
+  PUBLIC_BASE_URL = "https://densologie-scoreboard.fly.dev"
+  # Real client IP comes in via this Fly-injected header. Rate limiting keys on it.
+  TRUSTED_CLIENT_IP_HEADER = "Fly-Client-IP"
+  # Scheduler is live; poll intervals are set per-API via secrets when tokens arrive.
+  NO_SCHEDULER = ""
 
 [deploy]
   release_command = 'python -m app_dashboard.migrate'
