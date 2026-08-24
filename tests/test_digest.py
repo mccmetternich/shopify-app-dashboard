@@ -54,8 +54,8 @@ def _seed(db):
     )
     # Ad spend in the window
     db.execute(
-        "insert into ad_spend (date, campaign_id, spend) values "
-        "(%s,'camp1',150.00), (%s,'camp1',100.00)",
+        "insert into ad_spend (date, campaign_id, campaign_name, platform, spend) values "
+        "(%s,'camp1','Test Camp','meta',150.00), (%s,'camp1','Test Camp','meta',100.00)",
         ((NOW - timedelta(days=5)).date(), (NOW - timedelta(days=3)).date()),
     )
     # Subscription
@@ -148,3 +148,51 @@ def test_no_webhook_is_a_noop(db):
     sent, post = _capture()
     assert send_weekly_digest(db, _settings(webhook=None), http_post=post, now=NOW) is False
     assert sent == []
+
+
+# ── Days-of-cover red-flag: DB-backed (closes the Phase C inventory amendment) ─
+#
+# The red-flag path requires live DB data because days_of_cover() calls
+# _utcnow() internally rather than accepting a `now` override. Orders must
+# therefore be seeded at real wall-clock timestamps so they fall inside the
+# 14-day trailing window.
+
+def _seed_low_cover(db):
+    """Seed 20 serum orders at daily cadence (real time) + 40 units on hand.
+
+    Formula: units_on_hand=40, units_sold_14d≈15, daily_rate≈1.07 → ~37 days.
+    37 < 60  →  red-flag threshold breached.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    db.execute(
+        "insert into customers (id, email_hash, first_order_at) values ('lc', 'lch', %s)",
+        (now - timedelta(days=20),),
+    )
+    for i in range(20):
+        db.execute(
+            "insert into orders (id, customer_id, total, refunded, is_new_customer, "
+            "created_at, line_items) values (%s, 'lc', 149.00, 0, false, %s, "
+            """'[{"sku":"HAIR-SERUM-50ML","quantity":1}]'::jsonb)""",
+            (f"lco{i}", now - timedelta(days=i)),
+        )
+    db.execute(
+        "insert into inventory_levels (sku, units_on_hand, updated_at) "
+        "values ('HAIR-SERUM-50ML', 40, now())"
+    )
+    db.commit()
+
+
+def test_collect_digest_red_flag_fires_when_cover_below_60(db):
+    """collect_digest returns days_of_cover < 60 and render_digest includes :rotating_light:."""
+    _seed_low_cover(db)
+    data = collect_digest(db, _settings(), now=NOW)
+
+    assert data["days_of_cover"] is not None, "days_of_cover must not be None with seeded data"
+    assert data["days_of_cover"] < 60, (
+        f"expected days_of_cover < 60, got {data['days_of_cover']}"
+    )
+    text = render_digest(data)
+    assert ":rotating_light:" in text, "digest must include :rotating_light: when cover < 60"
+    cover_str = f"{data['days_of_cover']}d"
+    assert cover_str in text, f"digest must display cover value '{cover_str}'"
