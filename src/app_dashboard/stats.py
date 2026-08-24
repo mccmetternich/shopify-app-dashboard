@@ -308,7 +308,7 @@ def customer_cohorts(conn: psycopg.Connection) -> dict:
             "cohort": ym,
             "label": label,
             "size": cohort_size,
-            "values": values,
+            "cells": values,
         })
 
     return {
@@ -410,7 +410,7 @@ def subscription_retention(conn: psycopg.Connection) -> dict:
             "cohort": ym,
             "label": label,
             "size": cohort_size,
-            "values": values,
+            "cells": values,
         })
 
     return {
