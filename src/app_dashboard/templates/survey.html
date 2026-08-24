@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block pagehead %}
+<div class="page-head">
+    <form class="filters range" method="get">
+        <select name="window" aria-label="Time range">
+            <option value="all" {% if window == "all" %}selected{% endif %}>All time</option>
+            <option value="90" {% if window == "90" %}selected{% endif %}>Last 90 days</option>
+            <option value="30" {% if window == "30" %}selected{% endif %}>Last 30 days</option>
+        </select>
+        <button type="submit">Show</button>
+    </form>
+    <button type="button" id="copy-md" class="ghost">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true">
+            <rect x="5.2" y="2.2" width="8.6" height="11.6" rx="1.6"/><path d="M10.8 13.8H3.7a1.5 1.5 0 0 1-1.5-1.5V4.2"/>
+        </svg>
+        <span>Copy MD</span>
+    </button>
+</div>
+{% endblock %}
+{% block content %}
+<h1>Survey</h1>
+<p class="sub">Post-purchase: how did customers hear about Densologie? {{ total }} response{{ "" if total == 1 else "s" }}.</p>
+
+<div class="card">
+    <h2>Heard via</h2>
+    {% for row in tally %}
+    <div class="bar-row">
+        <span class="bar-label">{{ row.heard_via }}</span>
+        <span class="bar-track"><span class="bar" style="width: {{ row.pct }}%"></span></span>
+        <span class="bar-val">{{ row.count }} <span class="sub">({{ row.pct }}%)</span></span>
+    </div>
+    {% else %}
+    <p class="sub">No survey responses yet. Events arrive via <code>POST /ingest/usage</code> with <code>event_type: "survey_response"</code> and <code>properties.heard_via</code>.</p>
+    {% endfor %}
+</div>
+{% endblock %}

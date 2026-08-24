@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% macro cohort_grid(data, title, value_fmt, empty_msg, target_label="") %}
+<h2 id="{{ title|lower|replace(' ', '-') }}">{{ title }}</h2>
+{% if data.rows %}
+<div class="table-card" style="padding: 6px 0;">
+    <table>
+        <thead>
+            <tr>
+                <th>Cohort</th>
+                <th class="num">Size</th>
+                {% for i in range(data.max_age + 1) %}<th class="num">M{{ i }}</th>{% endfor %}
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in data.rows %}
+            <tr>
+                <td style="font-family: var(--mono); font-size: 13px;">{{ row.label }}</td>
+                <td class="num">{{ row.size }}</td>
+                {% for v in row.values %}
+                <td class="num" style="padding: 4px 5px;">
+                    {% if v is not none %}
+                    <div class="heat{% if value_fmt == 'pct' and v > 55 %} hot{% endif %}"
+                         {% if value_fmt == 'pct' %}style="background: rgb(var(--heat-rgb) / {{ "%.2f"|format(v / 125) }})"{% endif %}>
+                        {% if value_fmt == 'pct' %}{{ v }}%{% else %}${{ "%.0f"|format(v) }}{% endif %}
+                    </div>
+                    {% endif %}
+                </td>
+                {% endfor %}
+                {% for _ in range(data.max_age - row.values|length + 1) %}<td></td>{% endfor %}
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% if target_label and data.target_ltgp %}
+<p class="sub">Target LTGp: <strong>${{ "%.0f"|format(data.target_ltgp) }}</strong>{{ target_label }}</p>
+{% endif %}
+{% else %}
+<div class="empty-state"><p class="sub">{{ empty_msg }}</p></div>
+{% endif %}
+{% endmacro %}
+{% block content %}
+<h1>Cohorts</h1>
+<p class="sub">How much do customers spend over time, and how long do subscriptions last?</p>
+
+{{ cohort_grid(cohorts, "Revenue per customer", "usd",
+   "No orders yet. The grid starts once at least two cohort months have data.",
+   " — cumulative net revenue target per customer. The serum bundle at $228 plus one refill at $149.") }}
+<p class="sub">Each row is the calendar month of a customer's first order. Each cell is cumulative net
+revenue per cohort member through month N. Cells only appear once a cohort is old enough to observe.
+A rising diagonal means customers keep buying; a flat row after M0 means one-and-done.</p>
+
+{{ cohort_grid(sub_retention, "Subscription retention", "pct",
+   "No subscriptions yet. The grid starts once at least two cohort months have data.") }}
+<p class="sub">Each row is the month a subscription started; each cell is the share of that cohort
+still subscribed N months later. M0 is always 100%. Cells only appear once a cohort has been
+running long enough to observe that offset.</p>
+{% endblock %}

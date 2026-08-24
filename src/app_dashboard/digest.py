@@ -1,11 +1,6 @@
 """The Monday digest.
 
-One Slack message a week that answers "are we on pace to 500?" without anyone
-opening the dashboard. Reading it should take ten seconds; every line is a
-number plus its week-over-week change.
-
-Collecting and rendering are separate on purpose: `render_digest` is pure, so
-the wording is testable against a fixture without a database or a webhook.
+One Slack message a week. Six lead numbers from the Densologie schema.
 """
 
 import logging
@@ -19,127 +14,119 @@ from app_dashboard.slack import escape
 logger = logging.getLogger(__name__)
 
 DIGEST_SOURCE = "weekly_digest"
-# A digest is only worth sending once a week. The guard is a floor, not a
-# schedule: it stops a machine restart on Monday morning, a manual run, or a
-# history replay from firing a second (or historical) digest.
 MIN_DAYS_BETWEEN_DIGESTS = 3
-TRIAL_WATCH_IN_DIGEST = 3
 
 
-def collect_digest(conn, now=None) -> dict:
-    from app_dashboard.stats import (
-        mrr_at,
-        mrr_movement_between,
-        paying_at,
-        review_candidates,
-        trial_watch,
-    )
+def collect_digest(conn, settings, now=None) -> dict:
+    """Collect the six lead numbers for the weekly digest.
+
+    Returns:
+        revenue_7d: Decimal or None
+        new_customers: int
+        blended_cac: Decimal or None
+        mer: Decimal or None
+        subscription_share: Decimal or None (0-100)
+        days_of_cover: int or None
+    """
+    from app_dashboard.stats import days_of_cover as _days_of_cover
 
     now = now or datetime.now(timezone.utc)
     week_ago = now - timedelta(days=7)
-    two_weeks_ago = now - timedelta(days=14)
 
-    def count(sql, params):
-        return conn.execute(sql, params).fetchone()[0]
+    def scalar(sql, params=()):
+        row = conn.execute(sql, params).fetchone()
+        return row[0] if row else None
 
-    installs = count(
-        """select count(*) from app_events where type in ('installed', 'reinstalled')
-           and occurred_at >= %s""", (week_ago,))
-    uninstalls = count(
-        "select count(*) from app_events where type = 'uninstalled' and occurred_at >= %s",
-        (week_ago,))
-    installed = count("select count(*) from shops where install_state = 'installed'", ())
+    revenue_7d = scalar(
+        "select coalesce(sum(total - refunded), null) from orders where created_at >= %s",
+        (week_ago,),
+    )
 
-    # GA4 is day-grained and today is always partial, so both traffic windows
-    # are seven whole days ending yesterday. Lifecycle counts above are
-    # instant-grained and do include today; they come from a different source
-    # and would be wrong to truncate.
-    sessions, installs_ga4 = conn.execute(
-        """select coalesce(sum(sessions), 0), coalesce(sum(installs), 0) from ga4_daily
-           where dimension = 'total' and date >= %s and date < %s""",
-        (week_ago.date(), now.date())).fetchone()
-    prior_sessions = conn.execute(
-        """select coalesce(sum(sessions), 0) from ga4_daily
-           where dimension = 'total' and date >= %s and date < %s""",
-        (two_weeks_ago.date(), week_ago.date())).fetchone()[0]
+    new_customers = scalar(
+        "select count(distinct customer_id) from orders "
+        "where is_new_customer = true and created_at >= %s",
+        (week_ago,),
+    ) or 0
+
+    total_spend = scalar(
+        "select coalesce(sum(spend), null) from ad_spend where date >= %s::date",
+        (week_ago,),
+    )
+
+    blended_cac = (
+        total_spend / Decimal(new_customers)
+        if total_spend and new_customers else None
+    )
+
+    mer = (
+        revenue_7d / total_spend
+        if revenue_7d and total_spend and total_spend > 0 else None
+    )
+
+    subs_in_window = scalar(
+        "select count(distinct customer_id) from subscription_revenue "
+        "where converted_at >= %s",
+        (week_ago,),
+    ) or 0
+
+    subscription_share = (
+        Decimal("100") * Decimal(subs_in_window) / Decimal(new_customers)
+        if new_customers else None
+    )
+
+    doc = _days_of_cover(conn, settings.serum_sku)
 
     return {
-        "installed": installed,
-        # Net change in the installed base is the week's events, not a stored
-        # historical count: shops carries only current state.
-        "installed_delta": installs - uninstalls,
-        "installs": installs,
-        "uninstalls": uninstalls,
-        "paying": paying_at(conn, now),
-        "paying_delta": paying_at(conn, now) - paying_at(conn, week_ago),
-        "mrr": mrr_at(conn, now),
-        "mrr_delta": mrr_at(conn, now) - mrr_at(conn, week_ago),
-        "movement": mrr_movement_between(conn, week_ago, now),
-        "trial_watch": trial_watch(conn, now=now)[:TRIAL_WATCH_IN_DIGEST],
-        "trial_watch_total": len(trial_watch(conn, now=now)),
-        "review_candidates": len(review_candidates(conn)),
-        "sessions": sessions,
-        "sessions_delta": sessions - prior_sessions,
-        "listing_installs": installs_ga4,
+        "revenue_7d": revenue_7d,
+        "new_customers": new_customers,
+        "blended_cac": blended_cac,
+        "mer": mer,
+        "subscription_share": subscription_share,
+        "days_of_cover": doc,
     }
 
 
-def _signed(value) -> str:
-    return f"+{value}" if value > 0 else str(value)
-
-
 def _money(value) -> str:
-    return f"${Decimal(value):.2f}"
+    if value is None:
+        return "—"
+    return f"${Decimal(str(value)):,.0f}"
 
 
-def render_digest(data: dict, app_name: str = "The app") -> str:
-    """Plain Slack markdown, one message, no threads.
+def _pct(value) -> str:
+    if value is None:
+        return "—"
+    return f"{float(value):.0f}%"
 
-    Shop names appear (this is an internal channel and a call sheet is useless
-    without them); merchant emails and owner names never do.
-    """
-    move = data["movement"]
+
+def _ratio(value) -> str:
+    if value is None:
+        return "—"
+    return f"{float(value):.2f}x"
+
+
+def _days(value) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value}d"
+
+
+def render_digest(data: dict, app_name: str = "Densologie") -> str:
+    """Format the weekly digest as a Slack message."""
+    doc = data["days_of_cover"]
+    cover_flag = " :rotating_light:" if doc is not None and doc < 60 else ""
     lines = [
-        f"*{app_name}, last 7 days*",
-        f"Installed: *{data['installed']}* ({_signed(data['installed_delta'])})"
-        f"  ·  Paying: *{data['paying']}* ({_signed(data['paying_delta'])})"
-        f"  ·  MRR: *{_money(data['mrr'])}* ({_signed(round(data['mrr_delta']))})",
-        f"Installs {data['installs']}, uninstalls {data['uninstalls']}.",
+        f"*{app_name} Scoreboard — last 7 days*",
+        (
+            f"Revenue {_money(data['revenue_7d'])}"
+            f"  ·  New customers {data['new_customers']}"
+            f"  ·  CAC {_money(data['blended_cac'])}"
+        ),
+        (
+            f"MER {_ratio(data['mer'])}"
+            f"  ·  Sub share {_pct(data['subscription_share'])}"
+            f"  ·  Cover {_days(doc)}{cover_flag}"
+        ),
     ]
-
-    parts = []
-    for kind in ("new", "reactivation", "expansion", "contraction", "churned"):
-        if move[kind]:
-            parts.append(f"{kind} {_signed(round(move[kind]))}")
-    lines.append(
-        f"MRR movement: {', '.join(parts)} = {_signed(round(move['net']))}."
-        if parts else "MRR movement: nothing moved."
-    )
-
-    if data["sessions"]:
-        rate = round(100 * data["listing_installs"] / data["sessions"], 1)
-        lines.append(
-            f"Listing: *{data['sessions']}* sessions ({_signed(data['sessions_delta'])}), "
-            f"{data['listing_installs']} installs, {rate}% of sessions."
-        )
-    else:
-        lines.append("Listing: no GA4 sessions recorded this week.")
-
-    if data["trial_watch"]:
-        # Shop names are merchant-controlled and this string is posted to Slack
-        # as mrkdwn; see app_dashboard.slack.escape.
-        names = ", ".join(
-            f"{escape(s['shop'])} ({s['days']}d)" for s in data["trial_watch"]
-        )
-        lines.append(
-            f"Trial watch ({data['trial_watch_total']}): {names}."
-            + (" More on the Actions page." if data["trial_watch_total"]
-               > len(data["trial_watch"]) else "")
-        )
-    else:
-        lines.append("Trial watch: nobody installed recently is still unsubscribed.")
-
-    lines.append(f"{data['review_candidates']} merchants are due a review ask.")
     return "\n".join(lines)
 
 
@@ -163,9 +150,9 @@ def send_weekly_digest(conn, settings, http_post=httpx.post, now=None) -> bool:
         logger.info("SLACK_WEBHOOK_URL unset; skipping weekly digest")
         return False
 
-    text = render_digest(collect_digest(conn, now), settings.app_name)
+    text = render_digest(collect_digest(conn, settings, now), settings.app_name)
     if not post_alert(settings.slack_webhook_url, {"text": text}, http_post=http_post):
-        return False   # no timestamp written, so the next run retries
+        return False
 
     conn.execute(
         """insert into sync_state (source, last_synced_at) values (%s, now())

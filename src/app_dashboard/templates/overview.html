@@ -1,54 +1,92 @@
 {% extends "base.html" %}
 {% import "_macros.html" as ui %}
+{% block pagehead %}
+<div class="page-head">
+    {{ ui.window_form("window", window, window_choices, "days") }}
+    <button type="button" id="copy-md" class="ghost">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true">
+            <rect x="5.2" y="2.2" width="8.6" height="11.6" rx="1.6"/><path d="M10.8 13.8H3.7a1.5 1.5 0 0 1-1.5-1.5V4.2"/>
+        </svg>
+        <span>Copy MD</span>
+    </button>
+    <a href="/export.json" download class="ghost">
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 2.4v7.2"/><path d="M5 7l3 2.8L11 7"/><path d="M2.8 12.2v1.4h10.4v-1.4"/>
+        </svg>
+        <span>Download JSON</span>
+    </a>
+</div>
+{% endblock %}
 {% block content %}
 <h1>Overview</h1>
 
 <div class="ops-strip{% if health.stale %} stale{% endif %}">
     <span class="dot"></span>
-    <span>
-        {% if health.age_minutes is none %}Never synced{% else %}Synced {{ health.age_minutes }} min ago{% endif %}
-        {%- if health.stale %} &middot; expected every {{ health.page_threshold_minutes // 3 }} min{% endif %}
-    </span>
-    <span>{{ health.events_24h }} events ingested in 24h</span>
-    <span>{{ health.shops }} shops on record</span>
+    <span>{% if health.age_minutes is none %}Never synced{% else %}Synced {{ health.age_minutes }} min ago{% endif %}{% if health.stale %} &middot; stale after {{ health.page_threshold_minutes }} min{% endif %}</span>
 </div>
 
 <div class="cards">
-    {{ ui.stat("installed", stats.installed, compare=comparison.installed) }}
-    {{ ui.stat("active_mrr", "$" ~ "%.2f"|format(stats.active_mrr),
-               compare=comparison.active_mrr) }}
-    {{ ui.stat("paying", stats.paying,
-               extra="/ $" ~ "%.0f"|format(stats.arpu) ~ " ARPU",
-               compare=comparison.paying) }}
-    {{ ui.stat("installs_30d", stats.installs_30d, tone="up",
-               compare=comparison.installs_30d) }}
-    {{ ui.stat("uninstalls_30d", stats.uninstalls_30d, tone="down",
-               compare=comparison.uninstalls_30d) }}
-    {{ ui.stat("net_30d", "$" ~ "%.2f"|format(money.net_30d), extra="net",
-               compare=comparison.net_30d) }}
+    {% if stats.revenue is not none %}
+    {{ ui.stat("revenue", "$" ~ "%.0f"|format(stats.revenue), compare=comparison.revenue) }}
+    {% else %}{{ ui.stat("revenue", "—") }}{% endif %}
+
+    {{ ui.stat("new_customers", stats.new_customers, compare=comparison.new_customers) }}
+
+    {% if stats.blended_cac is not none %}
+    {{ ui.stat("blended_cac", "$" ~ "%.0f"|format(stats.blended_cac), compare=comparison.blended_cac) }}
+    {% else %}{{ ui.stat("blended_cac", "—") }}{% endif %}
+
+    {% if stats.mer is not none %}
+    {{ ui.stat("mer", "%.2f"|format(stats.mer) ~ "x", compare=comparison.mer) }}
+    {% else %}{{ ui.stat("mer", "—") }}{% endif %}
+
+    {% if stats.subscription_share is not none %}
+    {{ ui.stat("subscription_share", "%.0f"|format(stats.subscription_share) ~ "%", compare=comparison.subscription_share) }}
+    {% else %}{{ ui.stat("subscription_share", "—") }}{% endif %}
+
+    {% if stats.aov is not none %}
+    {{ ui.stat("aov", "$" ~ "%.0f"|format(stats.aov), compare=comparison.aov) }}
+    {% else %}{{ ui.stat("aov", "—") }}{% endif %}
 </div>
+
+{% if stats.days_of_cover is not none %}
+<div class="card stat{% if stats.days_of_cover < 60 %} down{% endif %}" style="max-width:260px;">
+    {% set m = METRICS["days_of_cover"] %}
+    <div class="label">{{ m.name }}
+        <details class="defn">
+            <summary aria-label="What Days of Cover measures">
+                <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v4"/><path d="M8 4.9h.01"/></svg>
+            </summary>
+            <div class="defn-card">
+                <p class="defn-name">{{ m.name }}</p>
+                <p>{{ m.definition }}</p>
+                <p class="defn-rule">{{ m.rule }}</p>
+                <p class="defn-src">Source: {{ m.source }}</p>
+            </div>
+        </details>
+    </div>
+    <div class="num">{{ stats.days_of_cover }}<small> days</small></div>
+    {% if stats.days_of_cover < 60 %}
+    <div class="delta bad"><span class="delta-num">Below 60-day threshold</span></div>
+    {% endif %}
+</div>
+{% endif %}
 
 <div class="card">
     <div class="card-head">
-        <h2 id="mrr">MRR, last {{ months }} months</h2>
-        {#- Governs the three money charts in this card only. The tiles above
-            are states rather than windows, so a range control over them would
-            be a control that does nothing. -#}
+        <h2 id="mrr">Subscription MRR, last {{ months }} months</h2>
         {{ ui.window_form("months", months, month_choices, "months") }}
     </div>
     {% for m in trend %}
     <div class="bar-row">
-        <span class="bar-label">{% if notes_by_month.get(m.label) %}<i class="anno-dot"
-            title="{{ notes_by_month[m.label]|map(attribute='note')|join(' / ') }}"></i>{% endif %}{{ m.label }}</span>
+        <span class="bar-label">{% if notes_by_month.get(m.label) %}<i class="anno-dot" title="{{ notes_by_month[m.label]|map(attribute='note')|join(' / ') }}"></i>{% endif %}{{ m.label }}</span>
         <span class="bar-track"><span class="bar" style="width: {{ 100 * m.mrr / trend_max }}%"></span></span>
         <span class="bar-val">${{ "%.0f"|format(m.mrr) }}</span>
     </div>
     {% else %}
-    <p class="sub">No subscriptions yet. The chart starts at the first conversion.</p>
+    <p class="sub">No subscriptions yet.</p>
     {% endfor %}
-    <p class="sub">Each month is the sum of subscriptions converted by that month's end and not yet
-    churned. Annual plans count at one twelfth of their price.
-    {%- if notes %} A dot marks a month with a <a href="#annotations">note</a>.{% endif %}</p>
+    <p class="sub">Each month is the sum of subscriptions active at that month-end. Annual plans count at one twelfth of their price.{% if notes %} A dot marks a month with a <a href="#annotations">note</a>.{% endif %}</p>
 
     <h2 id="movements">What moved it</h2>
     <div class="legend">
@@ -75,155 +113,56 @@
         <span class="bar-val">{{ "%+.0f"|format(m.net) }}</span>
     </div>
     {% endfor %}
-    <p class="sub">Each bar splits that month's change into its parts, so the five pieces add up to
-    the step in the line above. A shop that paid before, stopped, and came back counts as a
-    reactivation rather than a new customer.</p>
+    {% if not movements %}<p class="sub">No subscription movements yet.</p>{% endif %}
 </div>
 
 <div class="card">
-    <h2 id="collected">Money actually collected</h2>
-    <p class="sub">Everything above this line is MRR: what the current set of subscriptions is worth
-    per month. This is cash: what Shopify billed and what reached the payout. They are different
-    numbers and both are correct. MRR is a projection of a state; this is a record of what moved.</p>
-    <div class="legend">
-        <span><i style="background: var(--gone)"></i>Billed to the merchant</span>
-        <span><i style="background: var(--up)"></i>Reached the payout</span>
-    </div>
+    <h2 id="collected">Revenue by month</h2>
     {% for m in revenue %}
+    <div class="bar-row">
+        <span class="bar-label">{{ m.month }}</span>
+        <span class="bar-track"><span class="bar" style="width: {{ 100 * m.revenue / (revenue_max or 1) }}%"></span></span>
+        <span class="bar-val">${{ "%.0f"|format(m.revenue) }} <span class="sub">({{ m.orders }})</span></span>
+    </div>
+    {% else %}
+    <p class="sub">No orders yet.</p>
+    {% endfor %}
+    <p class="sub">Net revenue (total minus refunds) by calendar month.</p>
+</div>
+
+<div class="card">
+    <h2 id="activity">Orders vs refunds, last 6 months</h2>
+    <div class="legend">
+        <span><i style="background: var(--up)"></i>Orders</span>
+        <span><i style="background: var(--down)"></i>Refunded</span>
+    </div>
+    {% for m in activity %}
     <div class="bar-row">
         <span class="bar-label">{{ m.label }}</span>
         <span class="bar-pair">
-            <span class="bar-track"><span class="bar gone" style="width: {{ 100 * m.gross / revenue_max }}%"></span></span>
-            <span class="bar-track"><span class="bar" style="width: {{ 100 * m.net / revenue_max }}%"></span></span>
+            <span class="bar-track"><span class="bar" style="width: {{ 100 * m.installs / (activity_max or 1) }}%"></span></span>
+            <span class="bar-track"><span class="bar down" style="width: {{ 100 * m.uninstalls / (activity_max or 1) }}%"></span></span>
         </span>
-        <span class="bar-val">${{ "%.0f"|format(m.net) }}</span>
+        <span class="bar-val">{{ m.installs }} / {{ m.uninstalls }}</span>
     </div>
     {% else %}
-    <p class="sub">No transactions ingested yet.</p>
+    <p class="sub">No orders yet.</p>
     {% endfor %}
-    {% if money.count %}
-    <p class="sub">Across all {{ money.count }} transactions on record, back to
-    {{ money.first_at.strftime("%b %-d, %Y") }}: <strong>${{ "%.2f"|format(money.gross) }}</strong>
-    billed, <strong>${{ "%.2f"|format(money.net) }}</strong> received.
-    Shopify kept <strong>${{ "%.2f"|format(money.taken) }}</strong>, or
-    {{ money.taken_pct }}%.</p>
-    <p class="sub">That is the billing processing fee, not a revenue share. The revenue share is 0%
-    below $1M of lifetime earnings, so it reads $0.00 on most transactions. The fee is also not
-    a flat rate: identically priced charges settle anywhere from 2.9% to 5.9% depending on the merchant,
-    so this figure is measured per transaction rather than calculated from a percentage.</p>
-    {% if money.refund_count %}
-    <p class="sub"><strong>${{ "%.2f"|format(money.refunded) }} went back out</strong> across
-    {{ money.refund_count }} refund{{ "" if money.refund_count == 1 else "s" }} or
-    credit{{ "" if money.refund_count == 1 else "s" }}. These exist only in the transaction feed: no
-    app event is ever emitted for money coming back, so nothing else on this dashboard can see them.
-    The amounts above are already net of them.</p>
-    {% endif %}
-    {% endif %}
-</div>
-
-<div class="grid-2">
-    <div class="card">
-        <h2 id="activity">Installs vs uninstalls, last 6 months</h2>
-        <div class="legend">
-            <span><i style="background: var(--up)"></i>Installs</span>
-            <span><i style="background: var(--down)"></i>Uninstalls</span>
-        </div>
-        {% for m in activity %}
-        <div class="bar-row">
-            <span class="bar-label">{% if notes_by_month.get(m.label) %}<i class="anno-dot"
-                title="{{ notes_by_month[m.label]|map(attribute='note')|join(' / ') }}"></i>{% endif %}{{ m.label }}</span>
-            <span class="bar-pair">
-                <span class="bar-track"><span class="bar" style="width: {{ 100 * m.installs / activity_max }}%"></span></span>
-                <span class="bar-track"><span class="bar down" style="width: {{ 100 * m.uninstalls / activity_max }}%"></span></span>
-            </span>
-            <span class="bar-val">{{ "%+d"|format(m.installs - m.uninstalls) }} net</span>
-        </div>
-        {% else %}
-        <p class="sub">No lifecycle events yet. The strip at the top says when the last sync ran.</p>
-        {% endfor %}
-    </div>
-
-    <div class="card">
-        <h2 id="countries">Where customers are</h2>
-        <div class="legend">
-            <span><i style="background: var(--up)"></i>Installed now</span>
-            <span><i style="background: var(--gone)"></i>Ever installed</span>
-        </div>
-        {#- Every row that maps to a filter is a link into it. Most of the
-            drill-downs this page was missing were a missing anchor, not a
-            missing feature: /customers has taken these filters since it
-            shipped. The Other row is the exception and stays plain. -#}
-        {% for c in countries %}
-        <div class="bar-row">
-            <span class="bar-label">{% if c.other %}{{ c.country }}{% else %}<a
-                href="/customers?country={{ c.country|urlencode }}">{{ c.country }}</a>{% endif %}</span>
-            <span class="bar-pair">
-                <span class="bar-track"><span class="bar" style="width: {{ 100 * c.installed / country_max }}%"></span></span>
-                <span class="bar-track"><span class="bar gone" style="width: {{ 100 * c.ever / country_max }}%"></span></span>
-            </span>
-            <span class="bar-val">{{ c.installed }} / {{ c.ever }}</span>
-        </div>
-        {% else %}
-        <p class="sub">No country data. The Partner API does not expose merchant location; backfill it with the CSV importer.</p>
-        {% endfor %}
-        <p class="sub">A country links to those shops on Customers.</p>
-    </div>
-</div>
-
-<div class="grid-2">
-    <div class="card">
-        <h2 id="plans">Plan mix</h2>
-        {% for p in plans %}
-        <div class="bar-row">
-            <span class="bar-label">{% if p.interval %}<a
-                href="/customers?plan={{ p.interval|urlencode }}">{{ p.label }}</a>{% else %}{{ p.label }}{% endif %}</span>
-            <span class="bar-track"><span class="bar" style="width: {{ 100 * p.mrr / (plans[0].mrr or 1) }}%"></span></span>
-            <span class="bar-val">{{ p.count }} &middot; ${{ "%.0f"|format(p.mrr) }}</span>
-        </div>
-        {% else %}
-        <p class="sub">Nobody is paying yet.</p>
-        {% endfor %}
-        <p class="sub">A plan links to the shops currently on it.</p>
-    </div>
-
-    <div class="card">
-        <h2 id="reasons">Why people leave</h2>
-        {% for r in reasons %}
-        <div class="bar-row">
-            <span class="bar-label"><a
-                href="/reports/churn?bucket={{ r.label|urlencode }}#all">{{ r.label }}</a></span>
-            <span class="bar-track"><span class="bar down" style="width: {{ r.pct }}%"></span></span>
-            <span class="bar-val">{{ r.count }}</span>
-        </div>
-        {% else %}
-        <p class="sub">No uninstall reasons recorded yet.</p>
-        {% endfor %}
-        <p class="sub">Top five, and each one links to the merchants who said it. Full breakdown,
-        timing, and comments on <a href="/reports/churn">Churn</a>.</p>
-    </div>
 </div>
 
 <div class="card">
     <h2 id="annotations">Annotations</h2>
-    <p class="sub">MRR moved in March and this product used to have no way of saying why. A note
-    here marks its month on the charts above, so the reason survives the people who remember it.
-    A note that turned out to be wrong can be deleted. There is no edit: delete it and write it
-    again, which is one line of typing and leaves no half-corrected record behind.</p>
-
+    <p class="sub">A note marks a month on the charts above so the reason a number moved survives the people who remember it.</p>
     {% if note_error %}<p class="form-error">{{ note_error }}</p>{% endif %}
     {% if can_annotate %}
     <form class="anno-form" method="post" action="/annotations">
-        <input type="date" name="on_date" value="{{ today }}" max="{{ today }}" required
-               aria-label="Date it happened">
-        <input type="text" name="note" maxlength="{{ note_max }}" required
-               placeholder="Raised the price" aria-label="What happened">
+        <input type="date" name="on_date" value="{{ today }}" max="{{ today }}" required aria-label="Date it happened">
+        <input type="text" name="note" maxlength="{{ note_max }}" required placeholder="Raised price" aria-label="What happened">
         <button type="submit">Add note</button>
     </form>
     {% else %}
-    <p class="sub">Adding a note needs a browser session. This request authenticated some other
-    way.</p>
+    <p class="sub">Adding a note requires a Google sign-in session.</p>
     {% endif %}
-
     {% if notes %}
     <div class="anno-list">
         {% for n in notes %}
@@ -231,8 +170,6 @@
             <span class="anno-when">{{ n.on_date.strftime("%b %-d, %Y") }}</span>
             <span>{{ n.note }}<span class="anno-who">{{ n.author }}</span></span>
             {% if can_annotate %}
-            {# Two clicks to delete, using a native disclosure: the CSP allows no
-               inline script, so a confirm() dialog would never fire. #}
             <details class="anno-del">
                 <summary aria-label="Delete this note">Delete</summary>
                 <form method="post" action="/annotations/delete">
@@ -245,20 +182,5 @@
         {% endfor %}
     </div>
     {% endif %}
-</div>
-
-<div class="table-card">
-    <table>
-        <thead><tr><th>Latest activity</th><th>Shop</th><th>When (UTC)</th></tr></thead>
-        <tbody>
-            {% for e in events %}
-            <tr>
-                <td><span class="pill {{ e.type }}">{{ e.type }}</span></td>
-                <td>{{ e.shop }}</td>
-                <td class="sub">{{ e.at.strftime("%b %-d, %H:%M") }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
 </div>
 {% endblock %}

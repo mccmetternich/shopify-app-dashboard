@@ -38,10 +38,10 @@
         suffix straight out of the tile instead of wrapping. The suffix keeps
         its own nowrap in CSS, so "/ $19 ARPU" still moves as one piece. -#}
     <div class="num">{{ value }} {% if extra %}<small>{{ extra }}</small>{% endif %}</div>
-    {% if compare %}
+    {% if compare and compare.change is not none %}
     {#- Direction is only good or bad news when the metric says which way is
-        which. Uninstalls going up is not an achievement, and nothing here
-        should imply it is. -#}
+        which. A None change means one or both periods had no data, so we
+        show no delta rather than a misleading zero. -#}
     {% set rose = compare.change > 0 %}
     {% set fell = compare.change < 0 %}
     <div class="delta

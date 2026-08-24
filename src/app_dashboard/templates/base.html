@@ -742,33 +742,18 @@
     {% set NAV = [
         ("/", "overview", "Overview",
          '<path d="M3 10.5 10 4l7 6.5"/><path d="M5 9.5V16h10V9.5"/>',
-         [("MRR by month", "mrr"), ("What moved it", "movements"),
-          ("Money collected", "collected"),
-          ("Installs vs uninstalls", "activity"), ("Where customers are", "countries"),
-          ("Plan mix", "plans"), ("Why people leave", "reasons"),
+         [("Subscription MRR", "mrr"), ("What moved it", "movements"),
+          ("Revenue by month", "collected"), ("Orders vs refunds", "activity"),
           ("Annotations", "annotations")]),
-        ("/customers", "customers", "Customers",
-         '<circle cx="8" cy="7.5" r="2.8"/><path d="M2.8 16.2a5.2 5.2 0 0 1 10.4 0"/><path d="M14 5.2a2.6 2.6 0 0 1 0 4.8"/><path d="M15.4 16.2a4.6 4.6 0 0 0-1.9-3.6"/>',
-         []),
-        ("/actions", "actions", "Actions",
-         '<path d="M3.5 6.5 5 8l2.5-2.8"/><path d="M3.5 13.5 5 15l2.5-2.8"/><path d="M10 7h7"/><path d="M10 14h7"/>',
-         ([("Paying, but gone quiet", "quiet")] if tracking else [])
-         + [("Ask for a review", "review"), ("Pitch the annual plan", "annual"),
-            ("Trial watch", "trial")]),
-        ("/reports/funnel", "funnel", "Funnel",
-         '<path d="M3 4h14l-5.2 6v5.4L8.2 17v-7z"/>',
-         [("Lifecycle funnel", "lifecycle"), ("Activation", "activation")]),
-        ("/reports/churn", "churn", "Churn",
-         '<path d="M3 5.5l5 5 3-2.6 6 5.6"/><path d="M17 10.5v3.5h-3.5"/>',
-         [("How long before they left", "timing"), ("Uninstall reasons", "reasons"),
-          ("In their own words", "verbatims"), ("Every uninstall", "all")]),
-        ("/reports/retention", "retention", "Retention",
+        ("/cohorts", "cohorts", "Cohorts",
          '<rect x="3" y="3.5" width="14" height="13" rx="2"/><path d="M3 8h14"/><path d="M8 8v8.5"/>',
-         [("Installed retention", "installed"), ("Paying retention", "paying")]),
-        ("/reports/traffic", "traffic", "Traffic",
-         '<circle cx="10" cy="10" r="7"/><path d="M3 10h14"/><path d="M10 3a11 11 0 0 1 0 14a11 11 0 0 1 0-14z"/>',
-         [("Sessions and installs by month", "monthly"),
-          ("What GA4 missed", "reconciliation")]),
+         [("Revenue per customer", "revenue-per-customer"), ("Subscription retention", "subscription-retention")]),
+        ("/survey", "survey", "Survey",
+         '<path d="M3.5 6.5 5 8l2.5-2.8"/><path d="M3.5 13.5 5 15l2.5-2.8"/><path d="M10 7h7"/><path d="M10 14h7"/>',
+         []),
+        ("/faq", "faq", "FAQ",
+         '<circle cx="8" cy="8" r="6.2"/><path d="M6.3 6.1a1.8 1.8 0 113.1 1.2c-.6.5-1.4.8-1.4 1.7"/><path d="M8 11.6h.01"/>',
+         []),
     ] %}
     {#- One row of the sidebar. The icon is decorative: every row keeps its
         text label, so the picture never has to carry the meaning alone. -#}
@@ -836,17 +821,14 @@
                 <p><strong>Copy MD</strong> copies this page as markdown. Paste it
                 into an AI agent and ask it about the numbers.</p>
                 <p>Every page has a markdown twin: <code>/index.md</code>,
-                <code>/reports/churn.md</code>, <code>/customers/&lt;domain&gt;.md</code>.</p>
+                <code>/cohorts.md</code>, <code>/survey.md</code>.</p>
                 <p><strong>Download JSON</strong>, on Overview, saves every dataset
-                at its widest window as one file. A twin mirrors a page; that file
-                is the archive.</p>
+                as one file. A twin mirrors a page; that file is the archive.</p>
                 <p>The <strong>ⓘ</strong> beside a number says what it counts and
                 which table it comes from.</p>
-                <p><a href="/faq">Why don't these numbers match?</a> covers MRR
-                against cash, multi-select uninstall reasons, and GA4 against the
-                Partner API.</p>
+                <p><a href="/faq">Why don't these numbers match?</a> covers how MRR
+                differs from collected revenue, and how subscription share is counted.</p>
                 <p>The strip on Overview says how fresh the numbers are.</p>
-                <p>No merchant contact details are stored, on purpose.</p>
             </div>
         </details>
         <details class="acct">

@@ -1,199 +1,220 @@
 """One definition per number, written once.
 
-Every figure on a dashboard is somebody's decision about what to count, and a
-reader who cannot see that decision has to either trust it blind or go and read
-the SQL. Mixpanel solves this with Lexicon: descriptions live on the event, not
-in a wiki, and surface inside the report itself. This is the same idea at the
-size this app actually is -- a dict, not a governance product.
+Every figure on the dashboard is somebody's decision about what to count, and a
+reader who cannot see that decision has to either trust it blind or go read the
+SQL. This is the same idea as Mixpanel's Lexicon — a dict, not a governance
+product.
 
-The registry is the single source. The tiles read it for the hover panel, the
-markdown twins read it so a pasted page carries its own definitions into
-whatever agent reads it next, and `docs/architecture.md` points at this file
-rather than restating anything. A definition can therefore be wrong, but it
-cannot be *inconsistent*, which is the failure that actually happens: the page
-says one thing, the doc says another, and nobody knows which shipped first.
+The registry is the single source. Tiles read it for the hover panel, markdown
+twins read it so a pasted page carries its own definitions into whatever agent
+reads it next. A definition can therefore be wrong, but it cannot be
+*inconsistent* — the failure that actually happens in the wild.
 
-`rule` is deliberately close to the SQL rather than a paraphrase of it. A
-paraphrase is what drifts.
+`rule` stays close to the SQL rather than paraphrasing it. A paraphrase is what
+drifts. `definition` is the one sentence a non-technical reader gets.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Literal
 
 
 @dataclass(frozen=True)
 class Metric:
     name: str
-    """The label the tile shows. The template reads this rather than hardcoding
-    it, so renaming a metric renames it everywhere at once."""
+    """The label the tile shows."""
+
+    slug: str
+    """snake_case, used in export.json keys and URL slugs."""
+
+    unit: Literal["currency", "count", "percent", "ratio", "days", "text"]
+    """Drives how a delta is formatted."""
 
     definition: str
-    """One line of plain English. What a person would say out loud."""
+    """One sentence of plain English — what a person would say out loud."""
 
     rule: str
-    """The exact counting rule, close enough to the query to be checkable."""
+    """The exact counting rule, close enough to the query to be checkable.
+    Kept for backwards compatibility with _macros.html defn panel."""
 
-    source: str
-    """Which table is the truth for it. Money is always subscriptions joined to
-    charges, or transactions; never app_events.net_change."""
+    data_source: str
+    """Which table(s) or API feed this number comes from."""
+
+    # Alias so _macros.html `{{ m.source }}` still works
+    @property
+    def source(self) -> str:
+        return self.data_source
+
+    pages: tuple[str, ...]
+    """Which dashboard pages show this metric."""
 
     kind: str = "window"
-    """`point` is a state as of now (installed base, MRR). `window` is a count
-    over a span (installs in 30 days). The two compare to different things: a
-    point value against its value 30 days ago, a window against the window
-    before it. Getting this backwards is how a comparison lies."""
-
-    unit: str = "count"
-    """`count`, `usd`, or `pct`. Drives how a delta is formatted."""
+    """`point` = state as of now. `window` = count over a span.
+    Point metrics compare to their own past value; window metrics compare to the
+    prior window. Mixing them up is how a comparison lies."""
 
     better: str | None = None
     """`up`, `down`, or None when neither direction is good news on its own."""
 
+    warn_below: float | None = None
+    """For threshold tiles: show warning styling when value falls below this."""
+
+    warn_above: float | None = None
+    """For threshold tiles: show warning styling when value rises above this."""
+
 
 METRICS: dict[str, Metric] = {
-    # -- Overview headline tiles ------------------------------------------
-    "installed": Metric(
-        name="Currently installed",
-        definition="Shops whose most recent lifecycle event is an install.",
-        rule="count of shops where install_state = 'installed'",
-        source="shops, derived by replaying app_events",
-        kind="point", better="up",
-    ),
-    "active_mrr": Metric(
-        name="Active MRR",
-        definition="What the current set of subscriptions is worth per month. A "
-                   "projection, not cash.",
-        rule="sum of monthly_amount over subscriptions that have not churned, on "
-             "shops still installed. An annual plan counts as price / 12, but "
-             "only if its price is listed in ANNUAL_PLAN_AMOUNTS: the Partner "
-             "API does not state a billing interval, so an unlisted price is "
-             "treated as monthly and counted at twelve times its true value.",
-        source="subscriptions joined to charges",
-        kind="point", unit="usd", better="up",
-    ),
-    "paying": Metric(
-        name="Paying shops",
-        definition="Installed shops with a live subscription.",
-        rule="distinct shop_gid over subscriptions where churned_at is null and "
-             "the shop is still installed",
-        source="subscriptions joined to shops",
-        kind="point", better="up",
-    ),
-    "arpu": Metric(
-        name="ARPU",
-        definition="Average monthly revenue per paying shop.",
-        rule="active MRR divided by paying shops",
-        source="subscriptions joined to charges",
-        kind="point", unit="usd", better="up",
-    ),
-    "installs_30d": Metric(
-        name="Installs, last 30 days",
-        definition="Install and reinstall events in the last 30 days.",
-        rule="count of app_events of type 'installed' or 'reinstalled' with "
-             "occurred_at in the last 30 days",
-        source="app_events",
+
+    # ── Overview headline tiles ─────────────────────────────────────────────
+
+    "revenue": Metric(
+        name="Net Revenue",
+        slug="revenue",
+        unit="currency",
+        definition="Sum of order totals minus refunds for the period. Excludes tax and shipping.",
+        rule="sum(total - refunded) from orders where created_at in window",
+        data_source="orders",
+        pages=("overview",),
+        kind="window",
         better="up",
-    ),
-    "uninstalls_30d": Metric(
-        name="Uninstalls, last 30 days",
-        definition="Every uninstall in the last 30 days, including stores "
-                   "Shopify closed or froze.",
-        rule="count of app_events of type 'uninstalled' with occurred_at in the "
-             "last 30 days. The Churn page separates merchant-chosen exits from "
-             "deactivations; this tile does not.",
-        source="app_events",
-        better="down",
-    ),
-    "net_30d": Metric(
-        name="Collected, last 30 days",
-        definition="Cash that reached the payout in the last 30 days, net of "
-                   "Shopify's cut.",
-        rule="sum of net_amount over transactions created in the last 30 days",
-        source="transactions",
-        unit="usd", better="up",
-    ),
-    "churn_30d": Metric(
-        name="Logo churn, 30 days",
-        definition="Share of the shops that were installed 30 days ago who have "
-                   "since left.",
-        rule="uninstalls in the last 30 days divided by (currently installed + "
-             "those uninstalls)",
-        source="shops and app_events",
-        unit="pct", better="down",
-    ),
-    "ltv": Metric(
-        name="Lifetime value",
-        definition="What the average paying merchant is worth before they leave, "
-                   "at the current churn rate.",
-        rule="ARPU divided by the monthly subscription churn rate, measured over "
-             "90 days and scaled to a month. Null when nobody churned in the "
-             "window, because no departures is not evidence of no churn.",
-        source="subscriptions",
-        unit="usd", better="up",
     ),
 
-    # -- Traffic ----------------------------------------------------------
-    "sessions": Metric(
-        name="Listing sessions",
-        definition="Sessions on the App Store listing page.",
-        rule="sum of sessions from the GA4 daily totals row over the window",
-        source="ga4_daily",
+    "new_customers": Metric(
+        name="New Customers",
+        slug="new_customers",
+        unit="count",
+        definition="Orders where is_new_customer is true, deduplicated by customer. First-time buyers only.",
+        rule="count(distinct customer_id) from orders where is_new_customer = true and created_at in window",
+        data_source="orders",
+        pages=("overview",),
+        kind="window",
         better="up",
     ),
-    "add_app_clicks": Metric(
-        name="Add App clicks",
-        definition="Clicks on the listing's Add App button.",
-        rule="sum of add_app_clicks from the GA4 daily totals row over the window",
-        source="ga4_daily",
+
+    "blended_cac": Metric(
+        name="Blended CAC",
+        slug="blended_cac",
+        unit="currency",
+        definition="Total ad spend divided by new customers acquired in the period. Null when there are zero new customers.",
+        rule="sum(spend) from ad_spend in window / count of new customers in same window. Null when new_customers = 0.",
+        data_source="ad_spend, orders",
+        pages=("overview",),
+        kind="window",
+        better="down",
+    ),
+
+    "mer": Metric(
+        name="MER",
+        slug="mer",
+        unit="ratio",
+        definition="Marketing efficiency ratio: net revenue divided by total ad spend. Null when spend is zero.",
+        rule="sum(total - refunded) / sum(spend) across the window. Null when spend = 0.",
+        data_source="orders, ad_spend",
+        pages=("overview",),
+        kind="window",
         better="up",
     ),
-    "listing_installs": Metric(
-        name="Installs from listing",
-        definition="Installs GA4 saw. Lower than the real number, always.",
-        rule="sum of installs from the GA4 daily totals row over the window. This "
-             "is the browser-side shopify_app_install event; consent banners and "
-             "tracking blockers suppress it while the install still happens.",
-        source="ga4_daily",
+
+    "subscription_share": Metric(
+        name="Subscription Share",
+        slug="subscription_share",
+        unit="percent",
+        definition="Percentage of new-customer orders that have a corresponding subscription start.",
+        rule="count of customer_ids in subscription_revenue with converted_at in window / count of new customers in window * 100.",
+        data_source="orders, subscription_revenue",
+        pages=("overview",),
+        kind="window",
         better="up",
     ),
-    "install_rate": Metric(
-        name="Session to install",
-        definition="Share of listing sessions that ended in an install GA4 saw.",
-        rule="GA4 installs divided by GA4 sessions over the same window. A floor, "
-             "not an estimate: the numerator undercounts.",
-        source="ga4_daily",
-        unit="pct", better="up",
+
+    "aov": Metric(
+        name="AOV",
+        slug="aov",
+        unit="currency",
+        definition="Average order value (net revenue divided by order count) for the period.",
+        rule="sum(total - refunded) / count(*) from orders where created_at in window.",
+        data_source="orders",
+        pages=("overview",),
+        kind="window",
+        better="up",
     ),
-    "click_to_install": Metric(
-        name="Click to install",
-        definition="Share of Add App clicks that became an install GA4 saw.",
-        rule="GA4 installs divided by GA4 Add App clicks over the same window",
-        source="ga4_daily",
-        unit="pct", better="up",
+
+    "days_of_cover": Metric(
+        name="Days of Cover",
+        slug="days_of_cover",
+        unit="days",
+        definition="Units on hand for the serum SKU divided by the 14-day trailing daily unit sales rate. Null until 14 days of sales data exist.",
+        rule="inventory_levels.units_on_hand / (sum of line_item quantities for serum SKU in last 14 days / 14). Null when fewer than 14 days of orders exist.",
+        data_source="inventory_levels, orders",
+        pages=("overview",),
+        kind="point",
+        warn_below=60.0,
     ),
-    "ad_clicks": Metric(
-        name="Ad clicks",
-        definition="Listing sessions that arrived from a Shopify Ads placement.",
-        rule="sum of ad_clicks from the GA4 daily totals row over the window",
-        source="ga4_daily",
+
+    # ── Cohort metrics ──────────────────────────────────────────────────────
+
+    "cohort_revenue_per_customer": Metric(
+        name="Cohort Revenue / Customer",
+        slug="cohort_revenue_per_customer",
+        unit="currency",
+        definition="Cumulative net revenue per customer cohort member, N months after their first order.",
+        rule="sum(total - refunded) for all orders by customers in cohort / cohort_size, cumulative through month N.",
+        data_source="orders, customers",
+        pages=("cohorts",),
+        kind="point",
+        better="up",
+    ),
+
+    "subscription_retention": Metric(
+        name="Subscription Retention",
+        slug="subscription_retention",
+        unit="percent",
+        definition="Percentage of subscribers from a given start month who are still active N months later.",
+        rule="count of subscribers in cohort where churned_at is null or churned_at > cohort_month + N / cohort_size * 100.",
+        data_source="subscription_revenue",
+        pages=("cohorts",),
+        kind="point",
+        better="up",
+    ),
+
+    # ── Survey metrics ──────────────────────────────────────────────────────
+
+    "survey_tally": Metric(
+        name="Survey: Heard Via",
+        slug="survey_tally",
+        unit="count",
+        definition="Count of post-purchase survey responses grouped by how the customer heard about Densologie.",
+        rule="count(*) from usage_events where event_type = 'survey_response' grouped by properties->>'heard_via'.",
+        data_source="usage_events",
+        pages=("survey",),
+        kind="window",
     ),
 }
 
 
-# What a comparison is against, said out loud. A point-in-time metric compares
-# to its own past value; a windowed count compares to the window before it.
-# Rendering the wrong one is a lie that looks like a feature.
-COMPARE_LABEL = {"point": "vs 30 days ago", "window": "vs prior 30 days"}
+# ── Backwards-compatibility shims used by web.py, _macros.html, markdown_export.py ──
+
+COMPARE_LABEL = {"point": "vs prior period", "window": "vs prior window"}
 
 
 def signed(value, unit: str = "count") -> str:
     """A change, with its sign always visible.
 
-    `+0` is deliberate rather than blank: "no change" is information, and an
-    empty slot where the other five tiles have a number reads as broken.
+    `+0` is deliberate rather than blank: 'no change' is information, and an
+    empty slot where other tiles have a number reads as broken.
     """
-    if unit == "usd":
-        return f"{'-' if value < 0 else '+'}${abs(Decimal(value)):,.2f}"
-    if unit == "pct":
+    if unit in ("currency", "usd"):
+        return f"{'-' if value < 0 else '+'}${abs(Decimal(str(value))):,.2f}"
+    if unit in ("percent", "pct"):
         return f"{value:+.1f} pts"
+    if unit == "ratio":
+        return f"{value:+.2f}x"
     return f"{value:+,}"
+
+
+def get(slug: str) -> Metric:
+    return METRICS[slug]
+
+
+def all_metrics() -> list[Metric]:
+    return list(METRICS.values())

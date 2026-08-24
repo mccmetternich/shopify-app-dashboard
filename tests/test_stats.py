@@ -1,6 +1,7 @@
 """stats.py computes the numbers on the dashboard, so it gets direct coverage
 rather than being exercised only through page renders against an empty DB."""
 
+import pytest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -8,24 +9,15 @@ from app_dashboard.stats import (
     COMPARED,
     collected_revenue,
     country_breakdown,
-    churn_composition,
-    annual_upgrade_candidates,
-    churn_rows,
-    install_reconciliation,
     installed_at_time,
     overview_comparison,
     install_retention_cohorts,
     revenue_by_month,
     review_candidates,
-    store_deaths,
     trial_watch,
     mrr_movements,
     mrr_trend,
     overview_stats,
-    plan_mix,
-    time_to_uninstall,
-    uninstall_reasons,
-    uninstall_verbatims,
     unit_economics,
 )
 
@@ -161,6 +153,7 @@ def test_country_breakdown_folds_the_tail_into_other(db):
     assert rows[-1]["installed"] == 2
 
 
+@pytest.mark.skip(reason="Phase A: plan_mix removed (Partner API)")
 def test_plan_mix_labels_intervals(db):
     _shop(db, "s1")
     _shop(db, "s2")
@@ -178,6 +171,7 @@ def test_plan_mix_labels_intervals(db):
     assert labels["Annual"]["mrr"] == Decimal("15.83")
 
 
+@pytest.mark.skip(reason="Phase A: uninstall_reasons removed (Partner API)")
 def test_uninstall_reasons_group_across_languages(db):
     _shop(db, "s1", install_state="uninstalled")
     _shop(db, "s2", install_state="uninstalled")
@@ -196,6 +190,7 @@ def test_uninstall_reasons_group_across_languages(db):
     assert {l["lang"] for l in out["languages"]} == {"en", "de"}
 
 
+@pytest.mark.skip(reason="Phase A: uninstall_reasons removed (Partner API)")
 def test_reason_buckets_count_the_mandatory_era_only(db):
     """Shopify made the exit question mandatory partway through 2026. Pooling
     the eras averages a self-selected minority with a near-census, which is how
@@ -224,6 +219,7 @@ def test_reason_buckets_count_the_mandatory_era_only(db):
     assert sum(l["count"] for l in out["languages"]) == 2
 
 
+@pytest.mark.skip(reason="Phase A: uninstall_reasons removed (Partner API)")
 def test_deactivations_are_left_out_of_the_reason_denominator(db):
     _shop(db, "s1", install_state="uninstalled")
     _shop(db, "s2", install_state="uninstalled")
@@ -236,6 +232,7 @@ def test_deactivations_are_left_out_of_the_reason_denominator(db):
     assert out["coverage_pct"] == 100
 
 
+@pytest.mark.skip(reason="Phase A: uninstall_reasons removed (Partner API)")
 def test_multi_reason_uninstall_counts_in_every_bucket(db):
     _shop(db, "s1", install_state="uninstalled")
     _uninstall_event(db, "s1", "2026-07-01T00:00:00Z",
@@ -246,6 +243,7 @@ def test_multi_reason_uninstall_counts_in_every_bucket(db):
     assert {b["label"] for b in out["buckets"]} == {"Too expensive", "Testing multiple apps"}
 
 
+@pytest.mark.skip(reason="Phase A: time_to_uninstall removed (Partner API)")
 def test_time_to_uninstall_median_and_buckets(db):
     _shop(db, "s1", install_state="uninstalled",
           installed_at="2026-01-01Z", uninstalled_at="2026-01-01Z")       # same day
@@ -261,6 +259,7 @@ def test_time_to_uninstall_median_and_buckets(db):
     assert counts["Same day"] == 1 and counts["1-7 days"] == 1 and counts["31-90 days"] == 1
 
 
+@pytest.mark.skip(reason="Phase A: churn_composition removed (Partner API)")
 def test_churn_composition_separates_payers_from_tourists(db):
     _shop(db, "s1", install_state="uninstalled")
     _shop(db, "s2", install_state="uninstalled")
@@ -280,6 +279,7 @@ def _install_event(db, gid, at):
         "values (%s, 'installed', %s, %s)", (event_id, at, gid))
 
 
+@pytest.mark.skip(reason="Phase A: churn_rows/store_deaths removed (Partner API)")
 def test_churn_rows_counts_every_real_uninstall_and_no_deactivations(db):
     _shop(db, "s1", shop_name="Left Shop", install_state="uninstalled")
     _shop(db, "s2", shop_name="Dead Store", install_state="uninstalled")
@@ -302,6 +302,7 @@ def test_churn_rows_counts_every_real_uninstall_and_no_deactivations(db):
     assert deaths["count"] == 1 and deaths["rows"][0]["shop"] == "Dead Store"
 
 
+@pytest.mark.skip(reason="Phase A: churn_rows removed (Partner API)")
 def test_churn_rows_flag_shops_that_paid(db):
     _shop(db, "s1", shop_name="Payer", install_state="uninstalled")
     _shop(db, "s2", shop_name="Tourist", install_state="uninstalled")
@@ -320,6 +321,7 @@ def test_churn_rows_flag_shops_that_paid(db):
     assert [r["shop"] for r in churn_rows(db, paid="no")] == ["Tourist"]
 
 
+@pytest.mark.skip(reason="Phase A: churn_rows removed (Partner API)")
 def test_churn_rows_filter_on_whether_a_reason_was_given(db):
     _shop(db, "s1", shop_name="Talker", install_state="uninstalled")
     _shop(db, "s2", shop_name="Silent", install_state="uninstalled")
@@ -332,6 +334,7 @@ def test_churn_rows_filter_on_whether_a_reason_was_given(db):
     assert len(churn_rows(db, paid="'; drop table shops; --")) == 2
 
 
+@pytest.mark.skip(reason="Phase A: churn_rows removed (Partner API)")
 def test_churn_rows_measure_the_stay_that_ended_not_the_first_install(db):
     """A shop that installed, left, came back, and left again reports two stays."""
     _shop(db, "s1", shop_name="Repeat", install_state="uninstalled")
@@ -384,6 +387,7 @@ def test_review_candidates_exclude_churned_subscriptions(db):
     assert review_candidates(db) == []
 
 
+@pytest.mark.skip(reason="Phase A: annual_upgrade_candidates removed (Partner API)")
 def test_annual_candidates_are_monthly_plans_past_three_months(db):
     _shop(db, "s1", shop_name="Monthly Long")
     _shop(db, "s2", shop_name="Monthly Short")
@@ -527,6 +531,7 @@ def test_ltv_is_none_rather_than_infinite_when_nobody_churned(db):
     assert out["monthly_churn_pct"] == 0.0
 
 
+@pytest.mark.skip(reason="Phase A: install_reconciliation removed (GA4/Partner API)")
 def test_install_reconciliation_names_the_measurement_gap(db):
     now = datetime.now(timezone.utc)
     db.execute("insert into ga4_daily (date, dimension, value, sessions, users, "
@@ -547,12 +552,14 @@ def test_install_reconciliation_names_the_measurement_gap(db):
     assert out["missed_pct"] == 40.0
 
 
+@pytest.mark.skip(reason="Phase A: install_reconciliation removed (GA4/Partner API)")
 def test_install_reconciliation_survives_an_empty_partner_side(db):
     out = install_reconciliation(db)
     assert out["partner_installs"] == 0
     assert out["missed_pct"] == 0.0
 
 
+@pytest.mark.skip(reason="Phase A: uninstall_verbatims removed (Partner API)")
 def test_verbatims_group_under_the_first_reason_selected(db):
     _shop(db, "s1", shop_domain="a.myshopify.com", install_state="uninstalled")
     _shop(db, "s2", shop_domain="b.myshopify.com", install_state="uninstalled")
@@ -572,6 +579,7 @@ def test_verbatims_group_under_the_first_reason_selected(db):
     assert groups["Too expensive"]["notes"][0]["note"] == "Cheaper option elsewhere."
 
 
+@pytest.mark.skip(reason="Phase A: uninstall_verbatims removed (Partner API)")
 def test_verbatims_skip_empty_notes_and_deactivations(db):
     _shop(db, "s1", install_state="uninstalled")
     _shop(db, "s2", install_state="uninstalled")
@@ -692,6 +700,7 @@ def test_every_compared_key_is_reported(db):
 
 # --- Churn filters -----------------------------------------------------------
 
+@pytest.mark.skip(reason="Phase A: churn_rows removed (Partner API)")
 def test_churn_rows_filter_on_a_reason_bucket(db):
     _shop(db, "s1", install_state="uninstalled")
     _shop(db, "s2", install_state="uninstalled")
@@ -706,6 +715,7 @@ def test_churn_rows_filter_on_a_reason_bucket(db):
     assert churn_rows(db, bucket="Nonexistent bucket") == []
 
 
+@pytest.mark.skip(reason="Phase A: churn_rows removed (Partner API)")
 def test_a_multi_reason_uninstall_matches_either_bucket(db):
     _shop(db, "s1", install_state="uninstalled")
     _uninstall_event(db, "s1", "2026-07-01T00:00:00Z",
@@ -715,6 +725,7 @@ def test_a_multi_reason_uninstall_matches_either_bucket(db):
     assert len(churn_rows(db, bucket="Not using app now")) == 1
 
 
+@pytest.mark.skip(reason="Phase A: churn_rows removed (Partner API)")
 def test_churn_rows_take_a_window(db):
     now = datetime.now(timezone.utc)
     _shop(db, "s1", install_state="uninstalled")
@@ -728,6 +739,7 @@ def test_churn_rows_take_a_window(db):
     assert len(churn_rows(db, since_days=365)) == 2
 
 
+@pytest.mark.skip(reason="Phase A: churn_rows removed (Partner API)")
 def test_a_window_and_a_bucket_apply_together(db):
     now = datetime.now(timezone.utc)
     _shop(db, "s1", install_state="uninstalled")
@@ -740,6 +752,7 @@ def test_a_window_and_a_bucket_apply_together(db):
 
 # --- Link targets ------------------------------------------------------------
 
+@pytest.mark.skip(reason="Phase A: plan_mix removed (Partner API)")
 def test_plan_mix_carries_the_raw_interval_for_its_link(db):
     """The bar links to /customers?plan=..., so the interval has to survive the
     label lookup rather than being thrown away with it."""
