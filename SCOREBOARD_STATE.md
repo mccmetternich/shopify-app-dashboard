@@ -11,7 +11,7 @@ Repo: `mccmetternich/shopify-app-dashboard` (working name until rename).
 |-------|-----------------------------|-------------|-------------|
 | A     | Gut + rename + schema       | **COMPLETE** | Brand rename, Partner/GA4 module removal, 4 new migrations (011-014), seed, invariants. All 40 Python files syntax-clean; stale-import check passed (shops/ga4 refs are SQL strings only, not imports). |
 | B     | Ingest layer                | **COMPLETE** | Shopify Admin API + Meta Insights + Recharge poller + survey ingest. 9 new files, 7 modified. All 53 Python files syntax-clean. |
-| C     | Stats + pages               | NOT STARTED | metrics.py registry, Overview, Cohorts, Survey pages + .md twins + Slack digest. Includes inventory tile (see amendment). |
+| C     | Stats + pages               | **COMPLETE** | metrics.py registry (7 metrics + days_of_cover), stats.py aggregates, Overview/Cohorts/Survey routes, cohorts.html + survey.html templates, overview.html rewrite, base.html nav trim, digest rewrite (6-number Slack msg), markdown_export + export rewritten, 51 Python files syntax-clean. |
 | D     | Deploy + live wiring        | BLOCKED (needs secrets) | Fly.io deploy, Google OAuth, live sync |
 
 ### Phase C Amendment — Inventory tile
@@ -321,3 +321,26 @@ All src/, scripts/, tests/ .py files parsed clean with `python3 -c "import ast; 
 | Meta fetch_daily_spend uses explicit time_range (not date_preset) | Spec shows date_preset=last_7_days as example | time_range gives deterministic bounds; date_preset is relative to Meta's clock and the lookback_days arg wouldn't be honoured |
 | _mark_churned uses converted_at age proxy | Full last-charge tracking would require a separate table or materialized view | Phase B best-effort; Phase D replaces with Recharge cancellation webhooks |
 | survey_response in usage_event_types was pre-existing | Spec says "add survey_response to USAGE_EVENT_TYPES" | Already present from Phase A config; confirmed and documented, no change needed |
+
+---
+
+## Session Log
+
+### Session 2026-08-24 — Restart + Phase C completion
+
+**Findings on restart:**
+- All Phase A+B work was present in the working tree but UNCOMMITTED (nothing staged since original upstream commit `e480cf7`).
+- SCOREBOARD_STATE.md itself was untracked.
+- Runtime evidence (seed + invariants) never run — uv/psql not available in sandbox. Gap documented.
+- `import_shops_csv.py` and `tests/test_import_shops_csv.py` were orphaned (Phase A deletions missed them); deleted this session.
+- `metrics.py` was already Phase C-rewritten; `stats.py` and `web.py` routes were also Phase C-complete.
+- Remaining Phase C gaps: `digest.py` (still referenced `app_events`/`shops`), `markdown_export.py` (`_overview` used old stat keys), `export.py` (`overview_comparison` called with wrong signature), `cohorts.html`/`survey.html` templates missing, `overview.html` still rendered old Partner-API tiles, `base.html` nav had 7 stale pages, `test_digest.py`/`test_export.py` referenced old schema.
+
+**Work done:**
+- Implemented all Phase C remaining items (see Phase C commit message).
+- Committed Phase A+B as `35d7583`, Phase C as `134068f`.
+- Phase C syntax evidence: 51 Python files parsed clean with `ast.parse`.
+
+**Next session must start with Phase D setup:**
+- Phase D is BLOCKED until Matthias provides: `SHOPIFY_ADMIN_TOKEN`, `SHOPIFY_SHOP_DOMAIN`, `META_ACCESS_TOKEN`, `META_ACCOUNT_ID`, `RECHARGE_API_TOKEN`, `SLACK_WEBHOOK_URL`, `SESSION_SECRET`, Fly.io target app name, and Google OAuth client credentials.
+- Once secrets are available: `vercel env pull` / `fly secrets set`, run `uv run python scripts/seed_demo.py --yes` + `check_invariants.py` against a real Postgres to close the runtime evidence gap for Phases A–C, then deploy to Fly.io.
