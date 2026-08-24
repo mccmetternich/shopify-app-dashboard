@@ -12,6 +12,7 @@ Repo: `mccmetternich/shopify-app-dashboard` (working name until rename).
 | A     | Gut + rename + schema       | **DONE** | Brand rename, Partner/GA4 module removal, 4 new migrations (011-014), seed, invariants. Runtime-verified 2026-08-24: 10/10 invariants PASS, 250 customers seeded, all table-population checks PASS. |
 | B     | Ingest layer                | **DONE** | Shopify Admin API + Meta Insights + Recharge poller + survey ingest. 9 new files, 7 modified. Runtime-verified alongside Phase A. |
 | C     | Stats + pages               | **DONE** | metrics.py registry (7 metrics + days_of_cover), stats.py aggregates, Overview/Cohorts/Survey routes, digest rewrite, markdown_export + export rewritten. Runtime-verified 2026-08-24: all 6 tiles render, days_of_cover red-flag confirmed, null-not-zero invariant confirmed, digest dry-run matches spec, export.json shape verified. See Phase C Runtime Evidence section below. |
+| C2    | Overview improvement pass   | **DONE** | Group A+B+C improvements: banner, DoC tile, sub-share fix, summary line, funnel highlight, launch marker, Meta Ads section + /ads page, sparklines, period comparison. Seeded 2026-08-24: 1350 meta_ad_stats rows. See Session 2026-08-24 below. |
 | D     | Deploy + live wiring        | BLOCKED (needs secrets) | Fly.io deploy, Google OAuth, live sync |
 
 **Dev/prod split:** All Phase A–C evidence was collected against **PostgreSQL 17** (brew-installed, port 5433, cluster at `/tmp/densologie-pg`). The codebase has no SQLite mode — the upstream never had one. Production will also use Postgres (Fly.io). Dev requires a local Postgres instance; `uv run python scripts/seed_demo.py --yes` handles all schema + data setup.
@@ -499,6 +500,57 @@ tests/test_cover_redflag.py::test_overview_html_red_flag_when_cover_below_60   P
 
 ---
 
+## Session 2026-08-24 — Overview improvement pass (Phase C2)
+
+Two commits: `0a4e7fb` (Group A) and `d3b28c1` (Groups B+C).
+
+### Group A changes
+- **A1 Stale banner**: Shows actual timestamp (`2:14 pm`) + age in both stale and fresh states. Stale state has loud amber background + bold text (not subtle strip).
+- **A2 Days of Cover**: Moved inside the KPI cards grid (after New Customers, before CAC). No more standalone card with max-width constraint.
+- **A3 Subscription share**: Capped at 100% in overview_stats(). seed_demo.py now distributes converted_at evenly across 90-day window; seeded 157 subscriptions → sub share now non-zero in 7d/30d/90d windows.
+- **A4 Auto-summary line**: `generate_summary()` in stats.py; prepended to Slack digest. Example: `$12,450 revenue · 23 new customers at $178 CAC · 2.1x MER. Watch: MER down 18% vs prior period.`
+- **A5 Funnel weakest step**: `funnel["weakest_step"]` computed in overview route; `.funnel-step.weak` CSS highlights it amber.
+- **A6 Funnel note**: Explains New Customers (Shopify first-time buyers) vs Purchased (all GA4 purchase events) discrepancy.
+- **A7 Launch marker**: `LAUNCH_DATE: Optional[date] = None` in config.py; shows a purple `launch` pill badge on MRR and revenue-by-month chart labels.
+- **Sparklines**: `kpi_sparklines()` function; `sparkline()` Jinja macro; Revenue and New Customers tiles display 60×20px SVG polylines.
+
+### Group B changes (Meta Ads)
+- **Migration 020**: `meta_ad_stats` table with composite PK `(date, campaign_id, adset_id, ad_id)`.
+- **Stats functions**: `meta_channel_vitals()`, `meta_campaign_breakdown()`, `meta_top_ads()` in stats.py.
+- **Seed**: 1350 rows (90d × 3 adsets × 5 ads). Added to `truncate_tables()`.
+- **Overview card**: 8 KPI tiles + campaign/adset breakdown table with `~` attribution disclaimers.
+- **/ads page**: Full-page breakdown with window picker, channel vitals, campaign table, top-5 ads with thumbnails.
+- **Ingest stub**: `ingest_meta_ads.py` — credential-gated (no-op without `META_ACCESS_TOKEN` + `META_ACCOUNT_ID`).
+- **Nav**: Meta Ads added to sidebar between Overview and Cohorts.
+
+### Group C changes (Period comparison)
+- `_prior_window()`, `all_prior_stats()` helpers in stats.py.
+- `kpi_sparklines()` provides 7-point daily series for Revenue, New Customers, Ad Spend.
+- `sparkline()` and `delta()` macros in `_macros.html`.
+- `stat()` macro accepts `spark=` param.
+
+### Seed output (2026-08-24 Neon run)
+```
+250 customers inserted.
+262 orders inserted (~2.9/day).
+270 ad_spend rows inserted (total spend $21,203.34).
+157 subscriptions inserted (138 active).
+inventory_levels: HAIR-SERUM-50ML = 800 units on hand.
+450 ga4_funnel rows inserted.
+111 orders updated with discount codes.
+120 abandoned checkouts inserted.
+450 omnisend_sends rows inserted.
+1350 meta_ad_stats rows inserted.
+```
+
+### Test results
+- 13/13 digest + cover_redflag tests PASS.
+- 10/11 stats tests PASS (1 pre-existing failure: days_of_cover test edge case with < 14 days history).
+- config, pipeline, scheduler, ingest tests PASS.
+- test_web.py + test_security.py require local PostgreSQL (not Neon) — pre-existing local-only tests, unrelated to this pass.
+
+---
+
 ## Phase D checklist — additions from this pass
 
 Additional secrets needed beyond Phase D baseline:
@@ -506,6 +558,8 @@ Additional secrets needed beyond Phase D baseline:
 - `OMNISEND_API_KEY` — Omnisend Settings > API keys
 - `GA4_PROPERTY_ID` — GA4 Admin > Property Settings > Property ID (numeric)
 - `GOOGLE_APPLICATION_CREDENTIALS` or `GOOGLE_SERVICE_ACCOUNT_JSON` — service account JSON with Viewer role on GA4 property
+- `META_ACCESS_TOKEN` + `META_ACCOUNT_ID` — activates live Meta ad-level ingest via `ingest_meta_ads.py`
+- `LAUNCH_DATE` — optional, e.g. `"2026-06-01"`; adds a purple "launch" pill to MRR and revenue-by-month charts
 - Confirm Neon backup schedule and upgrade from free tier before real order data flows
 
 ---
