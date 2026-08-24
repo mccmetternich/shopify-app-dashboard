@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% import "_macros.html" as ui %}
+{% block content %}
+<h1>Meta Ads</h1>
+<p class="sub">All numbers from Meta's attribution model. <sup>~</sup> = estimated, not a Shopify hard count. Hard counts: spend, impressions, clicks.</p>
+
+{{ ui.window_form("window", window, window_choices, "days") }}
+
+<div class="card">
+    <h2>Channel vitals</h2>
+    <div class="cards" style="gap:12px;">
+        <div class="card stat"><div class="label">Spend</div><div class="num">{% if meta.spend %}${{ "%.0f"|format(meta.spend) }}{% else %}—{% endif %}</div></div>
+        <div class="card stat"><div class="label">Impressions</div><div class="num">{{ "{:,}".format(meta.impressions) }}</div></div>
+        <div class="card stat"><div class="label">Clicks</div><div class="num">{{ "{:,}".format(meta.clicks) }}</div></div>
+        <div class="card stat"><div class="label">CTR</div><div class="num">{% if meta.ctr %}{{ meta.ctr }}%{% else %}—{% endif %}</div></div>
+        <div class="card stat"><div class="label">CPC</div><div class="num">{% if meta.cpc %}${{ "%.2f"|format(meta.cpc) }}{% else %}—{% endif %}</div></div>
+        <div class="card stat"><div class="label">CPM</div><div class="num">{% if meta.cpm %}${{ "%.2f"|format(meta.cpm) }}{% else %}—{% endif %}</div></div>
+        <div class="card stat"><div class="label">Purchases <sup title="As reported by Meta — estimated">~</sup></div><div class="num">{{ meta.purchases }}</div></div>
+        <div class="card stat"><div class="label">ROAS <sup title="As reported by Meta — estimated. Compare to blended MER on Overview.">~</sup></div><div class="num">{% if meta.roas %}{{ meta.roas }}x{% else %}—{% endif %}</div></div>
+    </div>
+    <p class="sub" style="margin-top:8px;"><sup>~</sup> Meta purchases and ROAS are as reported by Meta's attribution model — estimated, not Shopify hard counts. The blended MER on Overview is the ground truth for total ad efficiency.</p>
+</div>
+
+{% if campaigns %}
+<div class="card">
+    <h2>By campaign / ad set</h2>
+    <table class="data-table">
+        <thead><tr><th>Campaign</th><th>Ad Set</th><th class="num">Spend</th><th class="num">Purchases <sup>~</sup></th><th class="num">CPA <sup>~</sup></th><th class="num">ROAS <sup>~</sup></th></tr></thead>
+        <tbody>
+        {% for r in campaigns %}
+        <tr>
+            <td>{{ r.campaign }}</td><td>{{ r.adset }}</td>
+            <td class="num">${{ "%.0f"|format(r.spend) }}</td>
+            <td class="num">{{ r.purchases }}</td>
+            <td class="num">{% if r.cpa %}${{ "%.0f"|format(r.cpa) }}{% else %}—{% endif %}</td>
+            <td class="num">{% if r.roas %}{{ r.roas }}x{% else %}—{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if top_ads %}
+<div class="card">
+    <h2>Top ads by spend</h2>
+    <p class="sub">Names and spend only — creative work stays in Meta Ads Manager.</p>
+    <table class="data-table">
+        <thead><tr><th>Ad</th><th class="num">Spend</th><th class="num">CTR</th><th class="num">Purchases <sup>~</sup></th><th class="num">ROAS <sup>~</sup></th><th></th></tr></thead>
+        <tbody>
+        {% for a in top_ads %}
+        <tr>
+            <td>
+                {% if a.thumbnail_url %}<img src="{{ a.thumbnail_url }}" width="32" height="32" style="vertical-align:middle;margin-right:8px;border-radius:3px;">{% endif %}
+                {{ a.name }}
+            </td>
+            <td class="num">${{ "%.0f"|format(a.spend) }}</td>
+            <td class="num">{% if a.ctr %}{{ a.ctr }}%{% else %}—{% endif %}</td>
+            <td class="num">{{ a.purchases }}</td>
+            <td class="num">{% if a.roas %}{{ a.roas }}x{% else %}—{% endif %}</td>
+            <td>{% if a.ads_manager_url %}<a href="{{ a.ads_manager_url }}" target="_blank" class="ghost" style="font-size:11px;">Open in Meta →</a>{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% if not meta.has_data and not campaigns and not top_ads %}
+<div class="card">
+    <div class="empty-state">
+        <p class="sub">No Meta data yet. Wire <code>META_ACCESS_TOKEN</code> and <code>META_ACCOUNT_ID</code> to start the ads feed, or run <code>seed_demo.py</code> to populate with synthetic data.</p>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
