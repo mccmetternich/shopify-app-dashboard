@@ -21,6 +21,13 @@
 <h1>Survey</h1>
 <p class="sub">Post-purchase: how did customers hear about Densologie? {{ total }} response{{ "" if total == 1 else "s" }}.</p>
 
+{% if not tally %}
+<div class="empty-state">
+    <p><strong>Awaiting survey data.</strong> This page populates once a post-purchase survey app POSTs responses to <code>POST /ingest/usage</code>.</p>
+    <p class="sub">See the POST contract in SCOREBOARD_STATE.md under "Survey ingest contract."</p>
+</div>
+{% endif %}
+
 <div class="card">
     <h2>Heard via</h2>
     {% for row in tally %}

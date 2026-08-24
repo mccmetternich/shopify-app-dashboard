@@ -496,3 +496,90 @@ tests/test_cover_redflag.py::test_overview_html_red_flag_when_cover_below_60   P
 **Next session starts with Phase D:**
 - Phase D is BLOCKED until Matthias provides: `SHOPIFY_ADMIN_TOKEN`, `SHOPIFY_SHOP_DOMAIN`, `META_ACCESS_TOKEN`, `META_ACCOUNT_ID`, `RECHARGE_API_TOKEN`, `SLACK_WEBHOOK_URL`, `SESSION_SECRET`, Fly.io target app name, and Google OAuth client credentials.
 - First action when secrets arrive: `fly secrets set ...`, deploy, smoke-test the live Overview page.
+
+---
+
+## Phase D checklist — additions from this pass
+
+Additional secrets needed beyond Phase D baseline:
+
+- `OMNISEND_API_KEY` — Omnisend Settings > API keys
+- `GA4_PROPERTY_ID` — GA4 Admin > Property Settings > Property ID (numeric)
+- `GOOGLE_APPLICATION_CREDENTIALS` or `GOOGLE_SERVICE_ACCOUNT_JSON` — service account JSON with Viewer role on GA4 property
+- Confirm Neon backup schedule and upgrade from free tier before real order data flows
+
+---
+
+## Phase E — Deferred items
+
+Items intentionally deferred past this pass:
+
+- Google Ads ingest (spend + conversions by campaign)
+- TikTok Ads ingest (spend + conversions by ad set)
+- Blended ROAS by platform breakdown (Meta vs Google vs TikTok in the MER card)
+- Payback period tile (CAC / monthly gross margin per customer)
+- 12-month LTV projection tile (based on cohort curve extrapolation)
+
+---
+
+## Survey ingest contract
+
+```
+POST /ingest/usage
+Headers:
+  Content-Type: application/json
+  X-Usage-Token: <USAGE_INGEST_TOKEN secret>
+
+Body (single event):
+{
+  "shop_gid": "densologie",
+  "event_id": "<unique string per response, e.g. uuid>",
+  "event_type": "survey_response",
+  "occurred_at": "2026-08-24T12:00:00Z",
+  "properties": {
+    "heard_via": "instagram"
+  }
+}
+
+Or batch (array of events):
+[{ ... }, { ... }]
+
+Accepted heard_via values (no constraint — free text, but consistent slugs recommended):
+  "instagram", "tiktok", "google", "friend", "facebook", "email", "podcast", "other"
+
+The /survey page groups by heard_via and shows count + %.
+Pick any Shopify post-purchase survey app that can POST a webhook with this shape.
+Options: Grapevine Surveys, Zigpoll, or ReConvert (thank-you-page survey).
+```
+
+---
+
+## Traffic source decision — GA4 chosen for funnel
+
+Evaluated GA4 vs Shopify Analytics API for funnel data source.
+
+Chose GA4 because:
+1. google-analytics-data Python client already in requirements
+2. ga4_funnel table added to schema (migration 018; replaces stub ga4_daily)
+3. Shopify's native GA4 integration auto-fires sessions, add_to_carts,
+   begin_checkout, purchase events — zero custom store code needed
+4. GA4 has native UTM/source dimension breakdown via sessionSource/sessionMedium
+5. Shopify Analytics API requires additional Admin API permission scope,
+   doesn't expose add_to_cart reliably, and has inconsistent UTM attribution
+
+Phase D activation: add GA4_PROPERTY_ID + GOOGLE_APPLICATION_CREDENTIALS secrets,
+call ingest_ga4.ingest_ga4() from the scheduler.
+
+---
+
+## Attribution honesty rules
+
+Hard counts (renders normally, no caveat):
+- orders, new_customers, refunds, discount usage, abandoned checkouts
+
+Estimated attribution (renders with ~ superscript and caption):
+- GA4 funnel steps (sessions/ATC/checkout are GA4 events, not Shopify hard counts)
+- Omnisend attributed revenue (Omnisend's own attribution window, not Shopify order link)
+- funnel_by_source conversion rates (UTM from GA4 session source, not guaranteed match to order UTM)
+
+The survey page is the human cross-check on all attribution.

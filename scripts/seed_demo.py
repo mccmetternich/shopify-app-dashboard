@@ -107,7 +107,8 @@ def utm_json(utm: dict | None) -> str | None:
 
 def truncate_tables(conn):
     # Truncate in FK-safe order (children first)
-    for table in ("subscription_revenue", "orders", "ad_spend", "customers",
+    for table in ("subscription_revenue", "omnisend_sends", "ga4_funnel",
+                  "checkouts", "orders", "ad_spend", "customers",
                   "inventory_levels"):
         conn.execute(f"truncate table {table} cascade")
     conn.commit()
@@ -328,6 +329,104 @@ def main() -> int:
         "select sku, units_on_hand from inventory_levels where sku = 'HAIR-SERUM-50ML'"
     ).fetchone()
     print(f"  inventory_levels: {inv_row[0]} = {inv_row[1]} units on hand.")
+
+    # ── GA4 funnel data ────────────────────────────────────────────────────────
+    print("  Seeding GA4 funnel data...")
+    funnel_sources = [
+        ("meta", "paid"),
+        ("google", "paid"),
+        ("", ""),           # organic / direct (empty string = no UTM)
+        ("email", "email"),
+        ("reactivation", "email"),
+    ]
+    for day_offset in range(DAYS):
+        day = (BASE_DATE + timedelta(days=day_offset))
+        for utm_source, utm_medium in funnel_sources:
+            base_sessions = int(RNG.uniform(30, 80))
+            atc = int(base_sessions * RNG.uniform(0.12, 0.22))
+            bc = int(atc * RNG.uniform(0.45, 0.65))
+            purchases = int(bc * RNG.uniform(0.55, 0.80))
+            if utm_source == "reactivation":
+                base_sessions = int(RNG.uniform(5, 20))
+                atc = int(base_sessions * RNG.uniform(0.20, 0.35))
+                bc = int(atc * RNG.uniform(0.55, 0.75))
+                purchases = int(bc * RNG.uniform(0.65, 0.85))
+            conn.execute(
+                "insert into ga4_funnel (date, utm_source, utm_medium, sessions, add_to_carts, begin_checkouts, purchases) "
+                "values (%s, %s, %s, %s, %s, %s, %s) "
+                "on conflict do nothing",
+                (day, utm_source, utm_medium, base_sessions, atc, bc, purchases),
+            )
+    conn.commit()
+    funnel_rows = conn.execute("select count(*) from ga4_funnel").fetchone()[0]
+    print(f"  {funnel_rows} ga4_funnel rows inserted.")
+
+    # ── Discount codes ─────────────────────────────────────────────────────────
+    print("  Seeding discount codes on orders...")
+    DISCOUNT_CODES = ["WELCOME10", "REACTIVATE15", "VIP20", None, None, None, None]
+    order_ids = [r[0] for r in conn.execute("select id from orders").fetchall()]
+    for oid in order_ids:
+        code = RNG.choice(DISCOUNT_CODES)
+        if code:
+            discount = float(RNG.choice([10.0, 15.0, 22.90, 14.90]))
+            conn.execute(
+                "update orders set discount_code = %s, discount_amount = %s where id = %s",
+                (code, discount, oid),
+            )
+    conn.commit()
+    disc_count = conn.execute(
+        "select count(*) from orders where discount_code is not null"
+    ).fetchone()[0]
+    print(f"  {disc_count} orders updated with discount codes.")
+
+    # ── Abandoned checkouts ────────────────────────────────────────────────────
+    print("  Seeding abandoned checkouts...")
+    for i in range(120):
+        created = ts(
+            BASE_DATE + timedelta(days=int(RNG.uniform(0, DAYS - 1))),
+            RNG.randint(0, 23), RNG.randint(0, 59)
+        )
+        abandoned = created + timedelta(hours=float(RNG.uniform(0.5, 4)))
+        recovered = abandoned + timedelta(hours=float(RNG.uniform(0.5, 24))) if RNG.random() < 0.18 else None
+        conn.execute(
+            "insert into checkouts (id, created_at, abandoned_at, recovered_at, total) "
+            "values (%s, %s, %s, %s, %s) on conflict do nothing",
+            (f"chk{i:04d}", created, abandoned, recovered,
+             float(RNG.choice([149.0, 228.0, 99.0]))),
+        )
+    conn.commit()
+    checkout_count = conn.execute("select count(*) from checkouts").fetchone()[0]
+    print(f"  {checkout_count} abandoned checkouts inserted.")
+
+    # ── Omnisend data ──────────────────────────────────────────────────────────
+    print("  Seeding Omnisend email metrics...")
+    OMNISEND_FLOWS = [
+        ("Welcome Series", ""),
+        ("Abandoned Cart", ""),
+        ("Post-Purchase", ""),
+        ("Win-Back", ""),
+        ("", "Aug Promo"),   # campaign (no flow name)
+    ]
+    for day_offset in range(DAYS):
+        day = BASE_DATE + timedelta(days=day_offset)
+        for flow_name, campaign_name in OMNISEND_FLOWS:
+            # Vary campaign name by month
+            camp = f"{campaign_name} {day_offset // 30 + 1}" if campaign_name else ""
+            sends = int(RNG.uniform(20, 200) if flow_name == "Welcome Series" else RNG.uniform(5, 80))
+            opens = int(sends * RNG.uniform(0.25, 0.45))
+            clicks = int(opens * RNG.uniform(0.10, 0.25))
+            rev = float(
+                RNG.uniform(0, 150) if flow_name in ("Abandoned Cart", "Win-Back")
+                else RNG.uniform(0, 80)
+            )
+            conn.execute(
+                "insert into omnisend_sends (date, flow_name, campaign_name, sends, opens, clicks, attributed_revenue) "
+                "values (%s, %s, %s, %s, %s, %s, %s) on conflict do nothing",
+                (day, flow_name, camp, sends, opens, clicks, round(rev, 2)),
+            )
+    conn.commit()
+    omni_count = conn.execute("select count(*) from omnisend_sends").fetchone()[0]
+    print(f"  {omni_count} omnisend_sends rows inserted.")
 
     conn.close()
     print("\nSeed complete. Run check_invariants.py to verify.")

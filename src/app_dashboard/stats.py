@@ -832,3 +832,302 @@ def trial_watch(conn, days: int = 14, now=None) -> list[dict]:
 def annual_upgrade_candidates(conn, min_months: int = 3) -> list[dict]:
     """Stub — no annual plan concept in Densologie schema yet."""
     return []
+
+
+# ── Funnel stats (GA4) ────────────────────────────────────────────────────────
+
+def funnel_stats(conn: psycopg.Connection, window_days: int) -> dict:
+    """Four-step acquisition funnel from GA4 data for the window.
+
+    Returns:
+        {
+            "sessions": int,
+            "add_to_carts": int,
+            "begin_checkouts": int,
+            "purchases": int,
+            "atc_rate": float | None,      # ATC / sessions
+            "checkout_rate": float | None, # begin_checkouts / ATC
+            "purchase_rate": float | None, # purchases / begin_checkouts
+            "overall_rate": float | None,  # purchases / sessions
+            "has_data": bool,
+        }
+    """
+    cutoff = _utcnow() - timedelta(days=window_days)
+    row = conn.execute(
+        """
+        select
+            coalesce(sum(sessions), 0),
+            coalesce(sum(add_to_carts), 0),
+            coalesce(sum(begin_checkouts), 0),
+            coalesce(sum(purchases), 0)
+        from ga4_funnel
+        where date >= %s::date
+        """,
+        (cutoff.date(),),
+    ).fetchone()
+
+    if not row or row[0] == 0:
+        return {
+            "sessions": 0, "add_to_carts": 0, "begin_checkouts": 0, "purchases": 0,
+            "atc_rate": None, "checkout_rate": None, "purchase_rate": None,
+            "overall_rate": None, "has_data": False,
+        }
+
+    sessions, atc, bc, purchases = row
+    return {
+        "sessions": sessions,
+        "add_to_carts": atc,
+        "begin_checkouts": bc,
+        "purchases": purchases,
+        "atc_rate": round(100 * atc / sessions, 1) if sessions else None,
+        "checkout_rate": round(100 * bc / atc, 1) if atc else None,
+        "purchase_rate": round(100 * purchases / bc, 1) if bc else None,
+        "overall_rate": round(100 * purchases / sessions, 1) if sessions else None,
+        "has_data": True,
+    }
+
+
+def funnel_by_source(conn: psycopg.Connection, window_days: int) -> list[dict]:
+    """Funnel breakdown by utm_source for the window.
+
+    Returns list of dicts, one per source, sorted by sessions desc:
+        [{"source": "meta", "sessions": 120, "add_to_carts": 30, ...}, ...]
+    """
+    cutoff = _utcnow() - timedelta(days=window_days)
+    rows = conn.execute(
+        """
+        select
+            case when utm_source = '' then 'organic' else utm_source end as source,
+            sum(sessions) as sessions,
+            sum(add_to_carts) as atc,
+            sum(begin_checkouts) as bc,
+            sum(purchases) as purchases
+        from ga4_funnel
+        where date >= %s::date
+        group by 1
+        order by sessions desc
+        """,
+        (cutoff.date(),),
+    ).fetchall()
+    return [
+        {
+            "source": r[0],
+            "sessions": r[1],
+            "add_to_carts": r[2],
+            "begin_checkouts": r[3],
+            "purchases": r[4],
+            "purchase_rate": round(100 * r[4] / r[1], 1) if r[1] else None,
+        }
+        for r in rows
+    ]
+
+
+def abandoned_checkout_stats(conn: psycopg.Connection, window_days: int) -> dict:
+    """Abandoned checkout count and recovery for the window.
+
+    Returns:
+        {"abandoned": int, "recovered": int, "recovered_revenue": Decimal | None}
+    """
+    cutoff = _utcnow() - timedelta(days=window_days)
+    row = conn.execute(
+        """
+        select
+            count(*) filter (where abandoned_at is not null),
+            count(*) filter (where recovered_at is not null),
+            sum(total) filter (where recovered_at is not null)
+        from checkouts
+        where created_at >= %s
+        """,
+        (cutoff,),
+    ).fetchone()
+    if not row:
+        return {"abandoned": 0, "recovered": 0, "recovered_revenue": None}
+    return {
+        "abandoned": row[0] or 0,
+        "recovered": row[1] or 0,
+        "recovered_revenue": row[2],
+    }
+
+
+def discount_usage(conn: psycopg.Connection, window_days: int) -> dict:
+    """Discount code usage for the window.
+
+    Returns:
+        {
+            "orders_with_discount": int,
+            "total_discount": Decimal | None,
+            "top_codes": [{"code": str, "count": int, "total_discount": Decimal}],
+        }
+    """
+    cutoff = _utcnow() - timedelta(days=window_days)
+    summary = conn.execute(
+        """
+        select count(*), sum(discount_amount)
+        from orders
+        where created_at >= %s and discount_code is not null and discount_amount > 0
+        """,
+        (cutoff,),
+    ).fetchone()
+    top = conn.execute(
+        """
+        select discount_code, count(*), sum(discount_amount)
+        from orders
+        where created_at >= %s and discount_code is not null and discount_amount > 0
+        group by discount_code
+        order by sum(discount_amount) desc
+        limit 5
+        """,
+        (cutoff,),
+    ).fetchall()
+    return {
+        "orders_with_discount": summary[0] or 0 if summary else 0,
+        "total_discount": summary[1] if summary else None,
+        "top_codes": [
+            {"code": r[0], "count": r[1], "total_discount": r[2]}
+            for r in top
+        ],
+    }
+
+
+def revenue_by_sku(conn: psycopg.Connection, window_days: int) -> list[dict]:
+    """Revenue and units sold per SKU for the window, from line_items JSONB.
+
+    Returns list sorted by revenue desc:
+        [{"sku": "HAIR-SERUM-50ML", "units": 42, "revenue": Decimal("6258.00")}, ...]
+    """
+    cutoff = _utcnow() - timedelta(days=window_days)
+    rows = conn.execute(
+        """
+        select
+            item->>'sku' as sku,
+            sum((item->>'quantity')::int) as units,
+            sum((item->>'quantity')::int * (o.total - o.refunded) / nullif(
+                (select sum((li->>'quantity')::int) from jsonb_array_elements(o.line_items) li), 0
+            )) as revenue
+        from orders o,
+             jsonb_array_elements(o.line_items) item
+        where o.created_at >= %s
+          and o.line_items != '[]'::jsonb
+        group by 1
+        order by revenue desc nulls last
+        """,
+        (cutoff,),
+    ).fetchall()
+    return [
+        {"sku": r[0], "units": r[1] or 0, "revenue": r[2]}
+        for r in rows if r[0]
+    ]
+
+
+def repeat_purchase_rate(conn: psycopg.Connection, window_days: int) -> dict:
+    """% of customers who placed more than one order within the window.
+
+    Returns: {"rate": Decimal | None, "repeat_customers": int, "total_customers": int}
+    """
+    cutoff = _utcnow() - timedelta(days=window_days)
+    row = conn.execute(
+        """
+        select
+            count(*) as total,
+            count(*) filter (where order_count > 1) as repeat_buyers
+        from (
+            select customer_id, count(*) as order_count
+            from orders
+            where created_at >= %s
+            group by customer_id
+        ) t
+        """,
+        (cutoff,),
+    ).fetchone()
+    if not row or not row[0]:
+        return {"rate": None, "repeat_customers": 0, "total_customers": 0}
+    total, repeat = row
+    rate = Decimal("100") * Decimal(repeat) / Decimal(total) if total else None
+    return {"rate": rate, "repeat_customers": repeat, "total_customers": total}
+
+
+def refund_rate(conn: psycopg.Connection, window_days: int) -> dict:
+    """% of orders that had any refund for the window.
+
+    Returns: {"rate": Decimal | None, "refunded_orders": int, "total_orders": int}
+    """
+    cutoff = _utcnow() - timedelta(days=window_days)
+    row = conn.execute(
+        """
+        select
+            count(*) as total,
+            count(*) filter (where refunded > 0) as refunded
+        from orders
+        where created_at >= %s
+        """,
+        (cutoff,),
+    ).fetchone()
+    if not row or not row[0]:
+        return {"rate": None, "refunded_orders": 0, "total_orders": 0}
+    total, refunded = row
+    rate = Decimal("100") * Decimal(refunded) / Decimal(total) if total else None
+    return {"rate": rate, "refunded_orders": refunded, "total_orders": total}
+
+
+def omnisend_summary(conn: psycopg.Connection, window_days: int, total_revenue) -> dict:
+    """Omnisend email/SMS summary for the window.
+
+    Returns:
+        {
+            "sends": int, "opens": int, "clicks": int,
+            "open_rate": float | None, "click_rate": float | None,
+            "attributed_revenue": Decimal | None,
+            "revenue_share": Decimal | None,   # % of total window revenue
+            "top_flows": [{"name": str, "revenue": Decimal, "clicks": int}],
+            "has_data": bool,
+        }
+    """
+    cutoff = _utcnow() - timedelta(days=window_days)
+    row = conn.execute(
+        """
+        select sum(sends), sum(opens), sum(clicks), sum(attributed_revenue)
+        from omnisend_sends
+        where date >= %s::date
+        """,
+        (cutoff.date(),),
+    ).fetchone()
+
+    if not row or not row[0]:
+        return {
+            "sends": 0, "opens": 0, "clicks": 0,
+            "open_rate": None, "click_rate": None,
+            "attributed_revenue": None, "revenue_share": None,
+            "top_flows": [], "has_data": False,
+        }
+
+    sends, opens, clicks, attributed = row
+
+    top_flows_rows = conn.execute(
+        """
+        select coalesce(nullif(flow_name,''), nullif(campaign_name,''), 'Unknown') as name,
+               sum(attributed_revenue) as rev,
+               sum(clicks) as cl
+        from omnisend_sends
+        where date >= %s::date and (flow_name != '' or campaign_name != '')
+        group by 1
+        order by rev desc
+        limit 5
+        """,
+        (cutoff.date(),),
+    ).fetchall()
+
+    rev_share = None
+    if attributed and total_revenue and total_revenue > 0:
+        rev_share = Decimal("100") * attributed / total_revenue
+
+    return {
+        "sends": sends or 0,
+        "opens": opens or 0,
+        "clicks": clicks or 0,
+        "open_rate": round(100 * opens / sends, 1) if sends else None,
+        "click_rate": round(100 * clicks / sends, 1) if sends else None,
+        "attributed_revenue": attributed,
+        "revenue_share": rev_share,
+        "top_flows": [{"name": r[0], "revenue": r[1], "clicks": r[2]} for r in top_flows_rows],
+        "has_data": True,
+    }
