@@ -2,6 +2,7 @@
 {% macro cohort_grid(data, title, value_fmt, empty_msg, target_label="") %}
 <h2 id="{{ title|lower|replace(' ', '-') }}">{{ title }}</h2>
 {% if data.rows %}
+<p class="sub" style="margin-top:4px;">M0 = month of first purchase, M1 = 1 month later, etc.</p>
 <div class="table-card" style="padding: 6px 0;">
     <table>
         <thead>

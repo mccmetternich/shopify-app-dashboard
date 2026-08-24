@@ -742,7 +742,10 @@
     {% set NAV = [
         ("/", "overview", "Overview",
          '<path d="M3 10.5 10 4l7 6.5"/><path d="M5 9.5V16h10V9.5"/>',
-         [("Subscription MRR", "mrr"), ("What moved it", "movements"),
+         [("Funnel", "funnel"), ("Email (Omnisend)", "omnisend"),
+          ("Revenue by product", "sku-revenue"), ("Abandoned checkouts", "abandoned-cart"),
+          ("Discounts", "discounts"),
+          ("Subscription MRR", "mrr"), ("Subscription revenue movements", "sub-movements"),
           ("Revenue by month", "collected"), ("Orders vs refunds", "activity"),
           ("Annotations", "annotations")]),
         ("/cohorts", "cohorts", "Cohorts",

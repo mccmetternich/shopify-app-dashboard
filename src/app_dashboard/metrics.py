@@ -107,7 +107,7 @@ METRICS: dict[str, Metric] = {
         name="MER",
         slug="mer",
         unit="ratio",
-        definition="Marketing efficiency ratio: net revenue divided by total ad spend. Null when spend is zero.",
+        definition="Marketing efficiency ratio: net revenue divided by total ad spend. Also called blended ROAS (revenue ÷ total ad spend). Null when spend is zero.",
         rule="sum(total - refunded) / sum(spend) across the window. Null when spend = 0.",
         data_source="orders, ad_spend",
         pages=("overview",),
@@ -175,6 +175,32 @@ METRICS: dict[str, Metric] = {
         pages=("cohorts",),
         kind="point",
         better="up",
+    ),
+
+    # ── Repeat purchase & refund ─────────────────────────────────────────────
+
+    "repeat_purchase_rate": Metric(
+        name="Repeat purchase rate",
+        slug="repeat_purchase_rate",
+        unit="percent",
+        definition="% of customers in the window who placed more than one order.",
+        rule="count of customer_ids with order_count > 1 / total customer_ids in window * 100.",
+        data_source="orders",
+        pages=("overview",),
+        kind="window",
+        better="up",
+    ),
+
+    "refund_rate": Metric(
+        name="Refund rate",
+        slug="refund_rate",
+        unit="percent",
+        definition="% of orders in the window with any refund amount.",
+        rule="count(*) filter (where refunded > 0) / count(*) from orders where created_at in window * 100.",
+        data_source="orders",
+        pages=("overview",),
+        kind="window",
+        better="down",
     ),
 
     # ── Survey metrics ──────────────────────────────────────────────────────

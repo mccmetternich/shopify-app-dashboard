@@ -47,6 +47,14 @@
     {% if stats.aov is not none %}
     {{ ui.stat("aov", "$" ~ "%.0f"|format(stats.aov), compare=comparison.aov) }}
     {% else %}{{ ui.stat("aov", "—") }}{% endif %}
+
+    {% if repeat_rate.rate is not none %}
+    {{ ui.stat("repeat_purchase_rate", "%.0f"|format(repeat_rate.rate) ~ "%") }}
+    {% else %}{{ ui.stat("repeat_purchase_rate", "—") }}{% endif %}
+
+    {% if refunds.rate is not none %}
+    {{ ui.stat("refund_rate", "%.1f"|format(refunds.rate) ~ "%") }}
+    {% else %}{{ ui.stat("refund_rate", "—") }}{% endif %}
 </div>
 
 {% if stats.days_of_cover is not none %}
@@ -73,6 +81,175 @@
 {% endif %}
 
 <div class="card">
+    <h2 id="funnel">Acquisition funnel</h2>
+    {% if funnel.has_data %}
+    <p class="sub">Sessions → Add to cart → Checkout → Purchase. Source: Google Analytics 4. Conversion rates are estimated from GA4 event counts, not a Shopify hard count.</p>
+    <div class="funnel-steps" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0;">
+        <div class="funnel-step" style="text-align:center;">
+            <div class="sub" style="font-size:12px;">Sessions</div>
+            <div style="font-family:var(--mono);font-weight:600;font-size:22px;">{{ "{:,}".format(funnel.sessions) }}</div>
+            <div class="sub">—</div>
+        </div>
+        <div style="color:var(--muted);font-size:18px;">→</div>
+        <div class="funnel-step" style="text-align:center;">
+            <div class="sub" style="font-size:12px;">Add to cart</div>
+            <div style="font-family:var(--mono);font-weight:600;font-size:22px;">{{ "{:,}".format(funnel.add_to_carts) }}</div>
+            <div class="sub">{% if funnel.atc_rate is not none %}{{ funnel.atc_rate }}%{% else %}—{% endif %}</div>
+        </div>
+        <div style="color:var(--muted);font-size:18px;">→</div>
+        <div class="funnel-step" style="text-align:center;">
+            <div class="sub" style="font-size:12px;">Checkout started</div>
+            <div style="font-family:var(--mono);font-weight:600;font-size:22px;">{{ "{:,}".format(funnel.begin_checkouts) }}</div>
+            <div class="sub">{% if funnel.checkout_rate is not none %}{{ funnel.checkout_rate }}%{% else %}—{% endif %}</div>
+        </div>
+        <div style="color:var(--muted);font-size:18px;">→</div>
+        <div class="funnel-step" style="text-align:center;">
+            <div class="sub" style="font-size:12px;">Purchased</div>
+            <div style="font-family:var(--mono);font-weight:600;font-size:22px;">{{ "{:,}".format(funnel.purchases) }}</div>
+            <div class="sub">{% if funnel.purchase_rate is not none %}{{ funnel.purchase_rate }}%{% else %}—{% endif %}</div>
+        </div>
+    </div>
+    {% if funnel_sources %}
+    <h3 style="margin-top:16px;font-size:13px;font-weight:600;">By traffic source <span class="sub" style="font-weight:400;">(estimated attribution)</span></h3>
+    <table class="data-table">
+        <thead><tr><th>Source</th><th class="num">Sessions</th><th class="num">ATC</th><th class="num">Checkout</th><th class="num">Purchased</th><th class="num">Conv%</th></tr></thead>
+        <tbody>
+        {% for s in funnel_sources %}
+        <tr>
+            <td>{{ s.source }}</td>
+            <td class="num">{{ "{:,}".format(s.sessions) }}</td>
+            <td class="num">{{ "{:,}".format(s.add_to_carts) }}</td>
+            <td class="num">{{ "{:,}".format(s.begin_checkouts) }}</td>
+            <td class="num">{{ "{:,}".format(s.purchases) }}</td>
+            <td class="num">{% if s.purchase_rate is not none %}{{ s.purchase_rate }}%{% else %}—{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+    {% else %}
+    <div class="empty-state">
+        <p class="sub">No GA4 data yet. Wire <code>GA4_PROPERTY_ID</code> and <code>GOOGLE_APPLICATION_CREDENTIALS</code> to start the funnel feed.</p>
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2 id="omnisend">Email &amp; SMS (Omnisend)</h2>
+    {% if omnisend.has_data %}
+    <div class="cards" style="gap:12px;margin-bottom:12px;">
+        <div class="card stat">
+            <div class="label">Sends</div>
+            <div class="num">{{ "{:,}".format(omnisend.sends) }}</div>
+        </div>
+        <div class="card stat">
+            <div class="label">Open rate</div>
+            <div class="num">{% if omnisend.open_rate is not none %}{{ omnisend.open_rate }}%{% else %}—{% endif %}</div>
+        </div>
+        <div class="card stat">
+            <div class="label">Click rate</div>
+            <div class="num">{% if omnisend.click_rate is not none %}{{ omnisend.click_rate }}%{% else %}—{% endif %}</div>
+        </div>
+        <div class="card stat">
+            <div class="label">Attributed revenue <sup title="Omnisend attribution estimate, not a Shopify hard count">~</sup></div>
+            <div class="num">{% if omnisend.attributed_revenue is not none %}${{ "%.0f"|format(omnisend.attributed_revenue) }}{% else %}—{% endif %}</div>
+        </div>
+        {% if omnisend.revenue_share is not none %}
+        <div class="card stat">
+            <div class="label">% of total revenue <sup title="Estimated">~</sup></div>
+            <div class="num">{{ "%.0f"|format(omnisend.revenue_share) }}%</div>
+        </div>
+        {% endif %}
+    </div>
+    <p class="sub" style="margin-bottom:8px;"><sup>~</sup> Revenue figures are Omnisend attribution estimates, not Shopify order counts. Use as directional only.</p>
+    {% if omnisend.top_flows %}
+    <h3 style="font-size:13px;font-weight:600;margin-bottom:6px;">Top flows &amp; campaigns</h3>
+    <table class="data-table">
+        <thead><tr><th>Flow / Campaign</th><th class="num">Clicks</th><th class="num">Attr. revenue <sup>~</sup></th></tr></thead>
+        <tbody>
+        {% for f in omnisend.top_flows %}
+        <tr>
+            <td>{{ f.name }}</td>
+            <td class="num">{{ "{:,}".format(f.clicks) }}</td>
+            <td class="num">${{ "%.0f"|format(f.revenue) }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+    {% else %}
+    <div class="empty-state">
+        <p class="sub">No Omnisend data yet. Wire <code>OMNISEND_API_KEY</code> to start the email feed.</p>
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2 id="sku-revenue">Revenue by product</h2>
+    {% if sku_revenue %}
+    {% set sku_max = namespace(val=1) %}
+    {% for s in sku_revenue %}{% if s.revenue and s.revenue > sku_max.val %}{% set sku_max.val = s.revenue %}{% endif %}{% endfor %}
+    {% for s in sku_revenue %}
+    <div class="bar-row">
+        <span class="bar-label" style="min-width:180px;">{{ s.sku }}</span>
+        <span class="bar-track"><span class="bar" style="width: {{ 100 * s.revenue / sku_max.val if s.revenue else 0 }}%"></span></span>
+        <span class="bar-val">${{ "%.0f"|format(s.revenue) }} <span class="sub">({{ s.units }} units)</span></span>
+    </div>
+    {% endfor %}
+    <p class="sub">Net revenue allocated proportionally across SKUs in the order. Estimated — multi-SKU orders split by quantity.</p>
+    {% else %}
+    <p class="sub">No order data yet.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2 id="abandoned-cart">Abandoned checkouts</h2>
+    {% if cart.abandoned > 0 %}
+    <div class="cards" style="gap:12px;">
+        <div class="card stat">
+            <div class="label">Abandoned</div>
+            <div class="num">{{ cart.abandoned }}</div>
+        </div>
+        <div class="card stat">
+            <div class="label">Recovered</div>
+            <div class="num">{{ cart.recovered }}</div>
+        </div>
+        {% if cart.recovered_revenue is not none %}
+        <div class="card stat">
+            <div class="label">Recovery revenue</div>
+            <div class="num">${{ "%.0f"|format(cart.recovered_revenue) }}</div>
+        </div>
+        {% endif %}
+    </div>
+    {% else %}
+    <p class="sub">No abandoned checkout data yet. Shopify ingest populates this.</p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2 id="discounts">Discount &amp; coupon usage</h2>
+    {% if discounts.orders_with_discount > 0 %}
+    <p>{{ discounts.orders_with_discount }} orders used a discount code — total ${{ "%.0f"|format(discounts.total_discount) }} off.</p>
+    {% if discounts.top_codes %}
+    <table class="data-table">
+        <thead><tr><th>Code</th><th class="num">Orders</th><th class="num">Total discount</th></tr></thead>
+        <tbody>
+        {% for c in discounts.top_codes %}
+        <tr>
+            <td>{{ c.code }}</td>
+            <td class="num">{{ c.count }}</td>
+            <td class="num">${{ "%.0f"|format(c.total_discount) }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+    {% else %}
+    <p class="sub">No discount codes used in this window. Populated once Shopify ingest is live.</p>
+    {% endif %}
+</div>
+
+<div class="card">
     <div class="card-head">
         <h2 id="mrr">Subscription MRR, last {{ months }} months</h2>
         {{ ui.window_form("months", months, month_choices, "months") }}
@@ -88,7 +265,7 @@
     {% endfor %}
     <p class="sub">Each month is the sum of subscriptions active at that month-end. Annual plans count at one twelfth of their price.{% if notes %} A dot marks a month with a <a href="#annotations">note</a>.{% endif %}</p>
 
-    <h2 id="movements">What moved it</h2>
+    <h2 id="sub-movements">Subscription revenue movements</h2>
     <div class="legend">
         <span><i style="background: var(--mv-new)"></i>New</span>
         <span><i style="background: var(--mv-reactivation)"></i>Reactivation</span>

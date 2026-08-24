@@ -50,24 +50,26 @@ from app_dashboard.ranges import (
 from app_dashboard.scheduler import start_scheduler
 from app_dashboard.security import RateLimiter, SecurityHeadersMiddleware, client_key
 from app_dashboard.stats import (
-    PLAN_LABELS,
-    annual_upgrade_candidates,
     collected_revenue,
     customer_cohorts,
     days_of_cover,
-    install_retention_cohorts,
     monthly_activity,
     mrr_movements,
     mrr_trend,
     overview_comparison,
     overview_stats,
-    plan_mix,
     recent_events,
-    retention_cohorts,
     revenue_by_month,
     subscription_retention,
     survey_tally,
-    uninstall_reasons,
+    funnel_stats,
+    funnel_by_source,
+    abandoned_checkout_stats,
+    discount_usage,
+    revenue_by_sku,
+    repeat_purchase_rate,
+    refund_rate,
+    omnisend_summary,
 )
 from app_dashboard.usage import (
     MAX_BODY_BYTES,
@@ -89,7 +91,7 @@ USAGE_TOKEN_HEADER = "X-Usage-Token"
 security = HTTPBasic(auto_error=False)
 
 # Valid window sizes for the overview time-range picker.
-WINDOW_CHOICES = [7, 30]
+WINDOW_CHOICES = [7, 30, 90]
 
 
 def _same_secret(supplied: str | None, expected: str | None) -> bool:
@@ -429,6 +431,14 @@ def create_app(conn_factory) -> FastAPI:
             movements = mrr_movements(conn, months_val)
             revenue = revenue_by_month(conn, months_val)
             activity = monthly_activity(conn)
+            funnel = funnel_stats(conn, window)
+            funnel_sources = funnel_by_source(conn, window)
+            cart = abandoned_checkout_stats(conn, window)
+            discounts = discount_usage(conn, window)
+            sku_revenue = revenue_by_sku(conn, window)
+            repeat_rate = repeat_purchase_rate(conn, window)
+            refunds = refund_rate(conn, window)
+            omnisend = omnisend_summary(conn, window, stats.get("revenue"))
         finally:
             conn.close()
 
@@ -469,6 +479,14 @@ def create_app(conn_factory) -> FastAPI:
                 "activity_max": activity_max,
                 "months": months_val,
                 "month_choices": MONEY_MONTHS,
+                "funnel": funnel,
+                "funnel_sources": funnel_sources,
+                "cart": cart,
+                "discounts": discounts,
+                "sku_revenue": sku_revenue,
+                "repeat_rate": repeat_rate,
+                "refunds": refunds,
+                "omnisend": omnisend,
             },
         )
 
@@ -602,22 +620,6 @@ def create_app(conn_factory) -> FastAPI:
                 "total": total,
                 "window": window,
             },
-        )
-
-    # ── Retention (legacy — kept for the /reports/retention route) ────────────
-
-    @app.get("/reports/retention")
-    def retention(request: Request, user: str = Depends(verify_creds)):
-        conn = conn_factory()
-        try:
-            data = retention_cohorts(conn)
-            installs = install_retention_cohorts(conn)
-        finally:
-            conn.close()
-        return templates.TemplateResponse(
-            request, "retention.html",
-            {"user": _display(request, user), "active": "retention",
-             "retention": data, "installs": installs},
         )
 
     # ── Markdown mirrors (.md twins) ──────────────────────────────────────────
