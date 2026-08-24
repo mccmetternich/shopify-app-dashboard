@@ -41,7 +41,7 @@ BASE_DATE = date(2026, 5, 25)   # first day of the seeded window
 
 # Densologie SKU universe ────────────────────────────────────────────────────
 SKUS = [
-    {"sku": "DSL-SERUM-30ML",   "title": "TRICHOGENESIS Hair Serum 30ml",    "price": Decimal("149.00")},
+    {"sku": "HAIR-SERUM-50ML",  "title": "TRICHOGENESIS Hair Serum 50ml",    "price": Decimal("149.00")},
     {"sku": "DSL-CAPS-60",      "title": "TRICHOGENESIS Capsules 60ct",       "price": Decimal("99.00")},
     {"sku": "DSL-BUNDLE-SYS",   "title": "TRICHOGENESIS System Bundle",       "price": Decimal("228.00")},
     {"sku": "DSL-SERUM-60ML",   "title": "TRICHOGENESIS Hair Serum 60ml",     "price": Decimal("228.00")},
@@ -202,7 +202,7 @@ def seed_ad_spend(conn) -> None:
             jitter = Decimal(str(round(RNG.uniform(0.85, 1.15), 4)))
             spend = round(base * jitter, 2)
 
-            impressions = int(spend * RNG.uniform(80, 130))
+            impressions = int(float(spend) * RNG.uniform(80, 130))
             clicks = int(impressions * RNG.uniform(0.01, 0.03))
 
             conn.execute(
