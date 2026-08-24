@@ -448,6 +448,49 @@ All src/, scripts/, tests/ .py files parsed clean with `python3 -c "import ast; 
 
 **Null-not-zero formal tests added:** 11 tests in `tests/test_stats.py` (commit b06f43c). All non-skipped tests that referenced removed schema (shops, subscriptions, transactions) are now marked `@pytest.mark.skip`.
 
+**Null-not-zero formal tests added:** 11 tests in `tests/test_stats.py` (commit b06f43c). All non-skipped tests that referenced removed schema (shops, subscriptions, transactions) are now marked `@pytest.mark.skip`.
+
+### Session 2026-08-24 — Inventory amendment red-flag closure (commit 97a90a1)
+
+**Gap identified:** Phase C runtime evidence showed `days_of_cover=933` (healthy), so the red-flag render path (`< 60`) was never exercised. Amendment not fully closed.
+
+**Fix:** Added DB-backed tests seeding 40 units on hand + 20 days of serum orders at 1/day cadence (real wall-clock time, so `days_of_cover()` sees them in its 14-day trailing window):
+
+```
+units_on_hand = 40
+units_sold_last_14d ≈ 15  (i=0..14 fall within the window)
+daily_rate = 15/14 ≈ 1.07 units/day
+days_of_cover = int(40 / 1.07) = 37
+37 < 60  →  red-flag threshold breached
+```
+
+**Also fixed:** `test_digest.py`'s `_seed()` helper was missing `campaign_name` and `platform` (both NOT NULL on `ad_spend`) — only caught when the test was first run against a real DB.
+
+**Test output (13/13 passed, commit 97a90a1):**
+```
+tests/test_digest.py::test_collect_counts_revenue_and_customers       PASSED
+tests/test_digest.py::test_collect_blended_cac                        PASSED
+tests/test_digest.py::test_collect_mer                                PASSED
+tests/test_digest.py::test_collect_subscription_share                 PASSED
+tests/test_digest.py::test_render_contains_key_numbers                PASSED
+tests/test_digest.py::test_render_no_data_shows_dashes                PASSED
+tests/test_digest.py::test_render_cover_flag_below_60                 PASSED
+tests/test_digest.py::test_digest_will_not_fire_twice_in_a_week       PASSED
+tests/test_digest.py::test_should_send_guards_replays_and_restarts    PASSED
+tests/test_digest.py::test_no_webhook_is_a_noop                       PASSED
+tests/test_digest.py::test_collect_digest_red_flag_fires_when_cover_below_60   PASSED
+tests/test_cover_redflag.py::test_digest_rotating_light_when_cover_below_60    PASSED
+tests/test_cover_redflag.py::test_overview_html_red_flag_when_cover_below_60   PASSED
+======================== 13 passed, 1 warning in 1.01s =========================
+```
+
+**Red-flag assertions confirmed:**
+- `collect_digest(db, settings)` → `days_of_cover=37` (not None, < 60)
+- `render_digest(data)` → text contains `:rotating_light:` and `37d`
+- `GET /` HTML → contains `class="card stat down"` and `Below 60-day threshold`
+
+**Inventory amendment: CLOSED.**
+
 **Phases A–C status: DONE.**
 
 **Next session starts with Phase D:**
