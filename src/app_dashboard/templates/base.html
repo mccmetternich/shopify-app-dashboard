@@ -558,8 +558,53 @@
             width: 8px; height: 8px; border-radius: 50%; background: var(--ok);
             flex: none;
         }
-        .ops-strip.stale { border-color: var(--down); color: var(--down); }
+        .ops-strip.stale {
+            border-color: var(--down); background: rgba(232, 89, 12, 0.08);
+            color: var(--down); font-weight: 600;
+            padding: 14px 16px; border-radius: 10px;
+        }
         .ops-strip.stale .dot { background: var(--down); }
+
+        /* Auto-summary line above the ops strip */
+        .summary-line {
+            background: var(--card);
+            border-left: 3px solid var(--brand);
+            padding: 10px 14px;
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 0;
+            border-radius: 0 4px 4px 0;
+            color: var(--ink);
+            border-top: 1px solid var(--border);
+            border-right: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+        }
+
+        /* Launch date marker on bar charts */
+        .launch-tag {
+            font-size: 10px; background: var(--brand); color: #fff;
+            padding: 1px 4px; border-radius: 3px; margin-left: 4px;
+            vertical-align: middle; font-weight: 600;
+        }
+
+        /* Weakest funnel step highlight */
+        .funnel-step.weak {
+            border: 1px solid #f59e0b;
+            background: rgba(245, 158, 11, 0.08);
+            border-radius: 6px;
+            padding: 4px;
+        }
+
+        /* data-table: used by Meta ads and other card tables */
+        .data-table { border-collapse: collapse; width: 100%; font-size: 14px; }
+        .data-table th {
+            text-align: left; font-size: 12px; text-transform: uppercase;
+            letter-spacing: .05em; color: var(--muted); font-weight: 600;
+            padding: 10px 12px; border-bottom: 1px solid var(--border); white-space: nowrap;
+        }
+        .data-table td { padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+        .data-table tbody tr:hover { background: var(--row-hover); }
+        .data-table td.num, .data-table th.num { text-align: right; font-family: var(--mono); }
 
         /* MRR movement waterfall: one row per month, zero axis down the middle.
            Sign is carried by which side of the axis a segment sits on, so the
@@ -742,12 +787,15 @@
     {% set NAV = [
         ("/", "overview", "Overview",
          '<path d="M3 10.5 10 4l7 6.5"/><path d="M5 9.5V16h10V9.5"/>',
-         [("Funnel", "funnel"), ("Email (Omnisend)", "omnisend"),
+         [("Funnel", "funnel"), ("Email (Omnisend)", "omnisend"), ("Meta Ads", "meta-ads"),
           ("Revenue by product", "sku-revenue"), ("Abandoned checkouts", "abandoned-cart"),
           ("Discounts", "discounts"),
           ("Subscription MRR", "mrr"), ("Subscription revenue movements", "sub-movements"),
           ("Revenue by month", "collected"), ("Orders vs refunds", "activity"),
           ("Annotations", "annotations")]),
+        ("/ads", "ads", "Meta Ads",
+         '<path d="M3 13V7.5L10 4l7 3.5V13"/><path d="M7 13V9.5l3-1.5 3 1.5V13"/><path d="M3 13h14"/>',
+         []),
         ("/cohorts", "cohorts", "Cohorts",
          '<rect x="3" y="3.5" width="14" height="13" rx="2"/><path d="M3 8h14"/><path d="M8 8v8.5"/>',
          [("Revenue per customer", "revenue-per-customer"), ("Subscription retention", "subscription-retention")]),

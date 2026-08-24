@@ -26,10 +26,32 @@
 </details>
 {% endmacro %}
 
+{#- Sparkline: tiny SVG polyline from a list of values (oldest first). -#}
+{% macro sparkline(values, color="#6C4BF4", width=60, height=20) %}
+{% set non_null = [] %}
+{% for v in values %}{% if v is not none %}{% set _ = non_null.append(v|float) %}{% endif %}{% endfor %}
+{% if non_null | length >= 2 %}
+{% set vmax = non_null | max %}
+{% set vmin = non_null | min %}
+{% set vrange = [(vmax - vmin), 0.01] | max %}
+{% set n = values | length %}
+{% set pts = namespace(s="") %}
+{% for v in values %}
+{% set x = (loop.index0 / (n - 1) * width) | round(1) %}
+{% set y = ((1 - (((v or 0) | float) - vmin) / vrange) * height) | round(1) %}
+{% set pts.s = pts.s ~ x ~ "," ~ y ~ " " %}
+{% endfor %}
+<svg width="{{ width }}" height="{{ height }}" style="display:inline-block;vertical-align:bottom;opacity:0.7">
+  <polyline points="{{ pts.s }}" fill="none" stroke="{{ color }}" stroke-width="1.5"/>
+</svg>
+{% endif %}
+{% endmacro %}
+
 {#- One headline tile: label, definition, number, and what it was before.
     `compare` is a row out of stats.overview_comparison, or nothing when the
-    figure has nothing honest to compare against. -#}
-{% macro stat(key, value, tone="", extra="", compare=none) %}
+    figure has nothing honest to compare against.
+    `spark` is a list of values (oldest first) for a sparkline. -#}
+{% macro stat(key, value, tone="", extra="", compare=none, spark=none) %}
 {% set m = METRICS[key] %}
 <div class="card stat{% if tone %} {{ tone }}{% endif %}">
     <div class="label">{{ m.name }} {{ defn(key) }}</div>
@@ -38,6 +60,9 @@
         suffix straight out of the tile instead of wrapping. The suffix keeps
         its own nowrap in CSS, so "/ $19 ARPU" still moves as one piece. -#}
     <div class="num">{{ value }} {% if extra %}<small>{{ extra }}</small>{% endif %}</div>
+    {% if spark %}
+    <div style="margin-top:4px;">{{ sparkline(spark) }}</div>
+    {% endif %}
     {% if compare and compare.change is not none %}
     {#- Direction is only good or bad news when the metric says which way is
         which. A None change means one or both periods had no data, so we
@@ -52,6 +77,17 @@
     </div>
     {% endif %}
 </div>
+{% endmacro %}
+
+{#- Inline delta: % change vs prior period for non-stat-tile cards. -#}
+{% macro delta(current, prior, invert=false) %}
+{% if current is not none and prior is not none and prior != 0 %}
+{% set pct = ((current - prior) / prior * 100) | round(1) %}
+{% set up = pct > 0 %}
+<span class="delta {{ 'up' if up else 'down' }}" style="font-size:11px;display:inline;">
+  {{ "%+.0f"|format(pct) }}% vs prior
+</span>
+{% endif %}
 {% endmacro %}
 
 {#- A window picker. A plain GET form with a submit button rather than an

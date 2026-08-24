@@ -1,6 +1,7 @@
 import logging
 from datetime import date
 from functools import lru_cache
+from typing import Optional
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -107,6 +108,10 @@ class Settings(BaseSettings):
     # No annotation may be dated before this. Set it to roughly when your brand
     # launched; a chart marker dated 1970 is a typo, not history.
     annotations_earliest: date = date(2020, 1, 1)
+
+    # Optional launch date — shown as a marker on MRR and revenue-by-month charts.
+    # Set to the date your store went live, e.g. "2026-06-01". Leave unset if unknown.
+    launch_date: Optional[date] = None
 
     # --- validation ---------------------------------------------------------
 

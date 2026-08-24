@@ -70,6 +70,11 @@ from app_dashboard.stats import (
     repeat_purchase_rate,
     refund_rate,
     omnisend_summary,
+    generate_summary,
+    kpi_sparklines,
+    meta_channel_vitals,
+    meta_campaign_breakdown,
+    meta_top_ads,
 )
 from app_dashboard.usage import (
     MAX_BODY_BYTES,
@@ -424,6 +429,12 @@ def create_app(conn_factory) -> FastAPI:
             stats["days_of_cover"] = doc
 
             health = sync_health(conn)
+            # Format last_synced_at as "2:14 pm" for the banner
+            if health["last_synced_at"]:
+                health["last_synced_at_fmt"] = health["last_synced_at"].strftime("%-I:%M %p").lower()
+            else:
+                health["last_synced_at_fmt"] = None
+
             notes = anno.recent(conn)
             notes_by_month = anno.by_month(conn)
             months_val = 12
@@ -432,6 +443,14 @@ def create_app(conn_factory) -> FastAPI:
             revenue = revenue_by_month(conn, months_val)
             activity = monthly_activity(conn)
             funnel = funnel_stats(conn, window)
+            # Identify weakest funnel step
+            steps = {
+                "atc": funnel.get("atc_rate"),
+                "checkout": funnel.get("checkout_rate"),
+                "purchase": funnel.get("purchase_rate"),
+            }
+            valid_steps = {k: v for k, v in steps.items() if v is not None}
+            funnel["weakest_step"] = min(valid_steps, key=valid_steps.get) if valid_steps else None
             funnel_sources = funnel_by_source(conn, window)
             cart = abandoned_checkout_stats(conn, window)
             discounts = discount_usage(conn, window)
@@ -439,6 +458,10 @@ def create_app(conn_factory) -> FastAPI:
             repeat_rate = repeat_purchase_rate(conn, window)
             refunds = refund_rate(conn, window)
             omnisend = omnisend_summary(conn, window, stats.get("revenue"))
+            meta = meta_channel_vitals(conn, window)
+            meta_campaigns = meta_campaign_breakdown(conn, window)
+            sparklines = kpi_sparklines(conn, days=window)
+            summary_line = generate_summary(stats, comparison, window)
         finally:
             conn.close()
 
@@ -487,6 +510,11 @@ def create_app(conn_factory) -> FastAPI:
                 "repeat_rate": repeat_rate,
                 "refunds": refunds,
                 "omnisend": omnisend,
+                "meta": meta,
+                "meta_campaigns": meta_campaigns,
+                "sparklines": sparklines,
+                "summary_line": summary_line,
+                "launch_date": settings.launch_date,
             },
         )
 
@@ -619,6 +647,31 @@ def create_app(conn_factory) -> FastAPI:
                 "tally": tally,
                 "total": total,
                 "window": window,
+            },
+        )
+
+    # ── Meta Ads page ─────────────────────────────────────────────────────────
+
+    @app.get("/ads")
+    def ads(request: Request, window: int = 7, user: str = Depends(verify_creds)):
+        window = window if window in WINDOW_CHOICES else 7
+        conn = conn_factory()
+        try:
+            meta = meta_channel_vitals(conn, window)
+            campaigns = meta_campaign_breakdown(conn, window)
+            top_ads = meta_top_ads(conn, window)
+        finally:
+            conn.close()
+        return templates.TemplateResponse(
+            request, "ads.html",
+            {
+                "user": _display(request, user),
+                "active": "ads",
+                "window": window,
+                "window_choices": WINDOW_CHOICES,
+                "meta": meta,
+                "campaigns": campaigns,
+                "top_ads": top_ads,
             },
         )
 

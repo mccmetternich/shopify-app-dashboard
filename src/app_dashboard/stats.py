@@ -125,7 +125,8 @@ def overview_stats(conn: psycopg.Connection, window_days: int = 7) -> dict:
     ) or 0
 
     if new_customers and new_customers > 0:
-        subscription_share = Decimal("100") * Decimal(subs_in_window) / Decimal(new_customers)
+        raw_share = Decimal("100") * Decimal(subs_in_window) / Decimal(new_customers)
+        subscription_share = min(raw_share, Decimal("100"))  # cap at 100%
     else:
         subscription_share = None
 
@@ -1067,6 +1068,231 @@ def refund_rate(conn: psycopg.Connection, window_days: int) -> dict:
     total, refunded = row
     rate = Decimal("100") * Decimal(refunded) / Decimal(total) if total else None
     return {"rate": rate, "refunded_orders": refunded, "total_orders": total}
+
+
+def generate_summary(stats: dict, comparison: dict, window_days: int) -> str:
+    """Generate a plain-language one-liner summarising the window's key numbers."""
+    parts = []
+    if stats.get("revenue") is not None:
+        parts.append(f"${stats['revenue']:,.0f} revenue")
+    if stats.get("new_customers"):
+        cac_str = f" at ${stats['blended_cac']:,.0f} CAC" if stats.get("blended_cac") else ""
+        parts.append(f"{stats['new_customers']} new customers{cac_str}")
+    if stats.get("mer") is not None:
+        parts.append(f"{float(stats['mer']):.1f}x MER")
+
+    sentence = " · ".join(parts) + "." if parts else "No data for this window."
+
+    # Weakest metric: biggest negative % change
+    watch = None
+    worst_pct = None
+    label_map = {
+        "revenue": "Revenue",
+        "blended_cac": "CAC",
+        "mer": "MER",
+        "subscription_share": "Subscription share",
+    }
+    for key, label in label_map.items():
+        comp = comparison.get(key, {})
+        pct = comp.get("pct")
+        if pct is None:
+            continue
+        # For CAC, higher is worse
+        if key == "blended_cac":
+            pct = -pct
+        if worst_pct is None or pct < worst_pct:
+            worst_pct = pct
+            watch_pct = comp.get("pct", 0)
+            direction = "up" if (watch_pct or 0) > 0 else "down"
+            watch = f"{label} {direction} {abs(watch_pct or 0):.0f}% vs prior period"
+
+    if watch and (worst_pct is not None) and worst_pct < -5:
+        sentence += f"  Watch: {watch}."
+
+    return sentence
+
+
+def _prior_window(window_days: int):
+    """Returns (prior_start, prior_end) datetimes for the window before the current one."""
+    now = _utcnow()
+    current_start = now - timedelta(days=window_days)
+    prior_end = current_start
+    prior_start = prior_end - timedelta(days=window_days)
+    return prior_start, prior_end
+
+
+def all_prior_stats(conn: psycopg.Connection, window_days: int) -> dict:
+    """Compute prior-period values for comparison display."""
+    prior_start, prior_end = _prior_window(window_days)
+
+    def scalar(sql, params=()):
+        row = conn.execute(sql, params).fetchone()
+        return row[0] if row else None
+
+    prior_cutoff_date = prior_start.date()
+    current_cutoff_date = prior_end.date()
+
+    return {
+        "omnisend_sends": scalar(
+            "select sum(sends) from omnisend_sends where date >= %s::date and date < %s::date",
+            (prior_cutoff_date, current_cutoff_date),
+        ) or 0,
+        "omnisend_attributed": scalar(
+            "select sum(attributed_revenue) from omnisend_sends "
+            "where date >= %s::date and date < %s::date",
+            (prior_cutoff_date, current_cutoff_date),
+        ),
+        "meta_spend": scalar(
+            "select sum(spend) from meta_ad_stats where date >= %s::date and date < %s::date",
+            (prior_cutoff_date, current_cutoff_date),
+        ),
+        "repeat_rate": scalar(
+            "select round(100.0 * count(*) filter(where order_count > 1) / nullif(count(*),0), 1) "
+            "from (select customer_id, count(*) as order_count from orders "
+            "where created_at >= %s and created_at < %s group by customer_id) t",
+            (prior_start, prior_end),
+        ),
+        "refund_rate": scalar(
+            "select round(100.0 * count(*) filter(where refunded>0) / nullif(count(*),0), 1) "
+            "from orders where created_at >= %s and created_at < %s",
+            (prior_start, prior_end),
+        ),
+    }
+
+
+def kpi_sparklines(conn: psycopg.Connection, days: int = 7) -> dict:
+    """Return the last `days` days of daily values for key KPIs, for sparklines."""
+    cutoff = _utcnow() - timedelta(days=days)
+
+    rev_rows = conn.execute(
+        """
+        select date_trunc('day', created_at)::date as d, sum(total - refunded)
+        from orders where created_at >= %s
+        group by d order by d
+        """, (cutoff,)
+    ).fetchall()
+
+    nc_rows = conn.execute(
+        """
+        select date_trunc('day', created_at)::date as d, count(distinct customer_id)
+        from orders where is_new_customer = true and created_at >= %s
+        group by d order by d
+        """, (cutoff,)
+    ).fetchall()
+
+    spend_rows = conn.execute(
+        "select date, sum(spend) from ad_spend where date >= %s::date group by date order by date",
+        (cutoff.date(),)
+    ).fetchall()
+
+    def to_series(rows, n=days):
+        d = {r[0]: r[1] for r in rows}
+        today = _utcnow().date()
+        return [d.get(today - timedelta(days=n - 1 - i)) for i in range(n)]
+
+    return {
+        "revenue": to_series(rev_rows),
+        "new_customers": to_series(nc_rows),
+        "ad_spend": to_series(spend_rows),
+    }
+
+
+def meta_channel_vitals(conn: psycopg.Connection, window_days: int) -> dict:
+    """Meta channel-level totals for the window."""
+    cutoff = _utcnow() - timedelta(days=window_days)
+    row = conn.execute(
+        """
+        select sum(spend), sum(impressions), sum(clicks),
+               sum(purchases), sum(purchase_value)
+        from meta_ad_stats
+        where date >= %s::date
+        """,
+        (cutoff.date(),),
+    ).fetchone()
+    if not row or not row[0]:
+        return {"spend": None, "impressions": 0, "clicks": 0,
+                "ctr": None, "cpc": None, "cpm": None,
+                "purchases": 0, "purchase_value": Decimal("0"),
+                "roas": None, "has_data": False}
+    spend, impr, clicks, purchases, pv = row
+    ctr = round(100 * clicks / impr, 2) if impr else None
+    cpc = (spend / Decimal(clicks)) if clicks else None
+    cpm = (spend / Decimal(impr) * 1000) if impr else None
+    roas = round(float(pv) / float(spend), 2) if spend and float(spend) > 0 else None
+    return {
+        "spend": spend, "impressions": impr or 0, "clicks": clicks or 0,
+        "ctr": ctr, "cpc": cpc, "cpm": cpm,
+        "purchases": purchases or 0, "purchase_value": pv or Decimal("0"),
+        "roas": roas, "has_data": True,
+    }
+
+
+def meta_campaign_breakdown(conn: psycopg.Connection, window_days: int) -> list[dict]:
+    """Spend/performance per campaign and ad set for the window."""
+    cutoff = _utcnow() - timedelta(days=window_days)
+    rows = conn.execute(
+        """
+        select campaign_name,
+               coalesce(nullif(adset_name,''), '—') as adset_name,
+               sum(spend) as spend,
+               sum(purchases) as purchases,
+               sum(purchase_value) as pv
+        from meta_ad_stats
+        where date >= %s::date
+        group by campaign_name, adset_name
+        order by spend desc
+        """,
+        (cutoff.date(),),
+    ).fetchall()
+    out = []
+    for r in rows:
+        spend = r[2] or Decimal("0")
+        purch = r[3] or 0
+        pv = r[4] or Decimal("0")
+        cpa = (spend / Decimal(purch)) if purch else None
+        roas = round(float(pv) / float(spend), 2) if spend and float(spend) > 0 else None
+        out.append({
+            "campaign": r[0], "adset": r[1],
+            "spend": spend, "purchases": purch,
+            "cpa": cpa, "roas": roas,
+        })
+    return out
+
+
+def meta_top_ads(conn: psycopg.Connection, window_days: int, limit: int = 5) -> list[dict]:
+    """Top N ads by spend with thumbnail and Ads Manager link."""
+    cutoff = _utcnow() - timedelta(days=window_days)
+    rows = conn.execute(
+        """
+        select ad_name,
+               sum(spend) as spend,
+               sum(clicks) as clicks,
+               sum(impressions) as impr,
+               sum(purchases) as purchases,
+               sum(purchase_value) as pv,
+               max(thumbnail_url) as thumb,
+               max(ads_manager_url) as url
+        from meta_ad_stats
+        where date >= %s::date and ad_id != ''
+        group by ad_name
+        order by spend desc
+        limit %s
+        """,
+        (cutoff.date(), limit),
+    ).fetchall()
+    out = []
+    for r in rows:
+        spend = r[1] or Decimal("0")
+        impr = r[3] or 0
+        pv = r[5] or Decimal("0")
+        ctr = round(100 * r[2] / impr, 2) if impr else None
+        roas = round(float(pv) / float(spend), 2) if spend and float(spend) > 0 else None
+        out.append({
+            "name": r[0], "spend": spend, "clicks": r[2] or 0,
+            "ctr": ctr, "purchases": r[4] or 0, "roas": roas,
+            "thumbnail_url": r[6], "ads_manager_url": r[7],
+        })
+    return out
 
 
 def omnisend_summary(conn: psycopg.Connection, window_days: int, total_revenue) -> dict:

@@ -20,17 +20,52 @@
 {% block content %}
 <h1>Overview</h1>
 
+{% if summary_line %}
+<div class="summary-line">{{ summary_line }}</div>
+{% endif %}
+
 <div class="ops-strip{% if health.stale %} stale{% endif %}">
     <span class="dot"></span>
-    <span>{% if health.age_minutes is none %}Never synced{% else %}Synced {{ health.age_minutes }} min ago{% endif %}{% if health.stale %} &middot; stale after {{ health.page_threshold_minutes }} min{% endif %}</span>
+    <span>
+    {% if health.stale %}
+        &#9888; Data is stale &mdash;
+        {% if health.age_minutes is not none %}last synced {{ health.age_minutes }} min ago{% if health.last_synced_at_fmt %} ({{ health.last_synced_at_fmt }}){% endif %}{% else %}never synced{% endif %}.
+        Numbers may be old.
+    {% else %}
+        &#10003; Synced {{ health.age_minutes }} min ago{% if health.last_synced_at_fmt %} ({{ health.last_synced_at_fmt }}){% endif %}
+    {% endif %}
+    </span>
 </div>
 
 <div class="cards">
     {% if stats.revenue is not none %}
-    {{ ui.stat("revenue", "$" ~ "%.0f"|format(stats.revenue), compare=comparison.revenue) }}
+    {{ ui.stat("revenue", "$" ~ "%.0f"|format(stats.revenue), compare=comparison.revenue, spark=sparklines.revenue) }}
     {% else %}{{ ui.stat("revenue", "—") }}{% endif %}
 
-    {{ ui.stat("new_customers", stats.new_customers, compare=comparison.new_customers) }}
+    {{ ui.stat("new_customers", stats.new_customers, compare=comparison.new_customers, spark=sparklines.new_customers) }}
+
+    {% if stats.days_of_cover is not none %}
+    <div class="card stat{% if stats.days_of_cover < 60 %} down{% endif %}">
+        {% set m = METRICS["days_of_cover"] %}
+        <div class="label">{{ m.name }}
+            <details class="defn">
+                <summary aria-label="What Days of Cover measures">
+                    <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v4"/><path d="M8 4.9h.01"/></svg>
+                </summary>
+                <div class="defn-card">
+                    <p class="defn-name">{{ m.name }}</p>
+                    <p>{{ m.definition }}</p>
+                    <p class="defn-rule">{{ m.rule }}</p>
+                    <p class="defn-src">Source: {{ m.source }}</p>
+                </div>
+            </details>
+        </div>
+        <div class="num">{{ stats.days_of_cover }}<small> days</small></div>
+        {% if stats.days_of_cover < 60 %}
+        <div class="delta bad"><span class="delta-num">Below 60-day threshold</span></div>
+        {% endif %}
+    </div>
+    {% endif %}
 
     {% if stats.blended_cac is not none %}
     {{ ui.stat("blended_cac", "$" ~ "%.0f"|format(stats.blended_cac), compare=comparison.blended_cac) }}
@@ -57,29 +92,6 @@
     {% else %}{{ ui.stat("refund_rate", "—") }}{% endif %}
 </div>
 
-{% if stats.days_of_cover is not none %}
-<div class="card stat{% if stats.days_of_cover < 60 %} down{% endif %}" style="max-width:260px;">
-    {% set m = METRICS["days_of_cover"] %}
-    <div class="label">{{ m.name }}
-        <details class="defn">
-            <summary aria-label="What Days of Cover measures">
-                <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="6.2"/><path d="M8 7.2v4"/><path d="M8 4.9h.01"/></svg>
-            </summary>
-            <div class="defn-card">
-                <p class="defn-name">{{ m.name }}</p>
-                <p>{{ m.definition }}</p>
-                <p class="defn-rule">{{ m.rule }}</p>
-                <p class="defn-src">Source: {{ m.source }}</p>
-            </div>
-        </details>
-    </div>
-    <div class="num">{{ stats.days_of_cover }}<small> days</small></div>
-    {% if stats.days_of_cover < 60 %}
-    <div class="delta bad"><span class="delta-num">Below 60-day threshold</span></div>
-    {% endif %}
-</div>
-{% endif %}
-
 <div class="card">
     <h2 id="funnel">Acquisition funnel</h2>
     {% if funnel.has_data %}
@@ -91,19 +103,19 @@
             <div class="sub">—</div>
         </div>
         <div style="color:var(--muted);font-size:18px;">→</div>
-        <div class="funnel-step" style="text-align:center;">
+        <div class="funnel-step{% if funnel.weakest_step == 'atc' %} weak{% endif %}" style="text-align:center;">
             <div class="sub" style="font-size:12px;">Add to cart</div>
             <div style="font-family:var(--mono);font-weight:600;font-size:22px;">{{ "{:,}".format(funnel.add_to_carts) }}</div>
             <div class="sub">{% if funnel.atc_rate is not none %}{{ funnel.atc_rate }}%{% else %}—{% endif %}</div>
         </div>
         <div style="color:var(--muted);font-size:18px;">→</div>
-        <div class="funnel-step" style="text-align:center;">
+        <div class="funnel-step{% if funnel.weakest_step == 'checkout' %} weak{% endif %}" style="text-align:center;">
             <div class="sub" style="font-size:12px;">Checkout started</div>
             <div style="font-family:var(--mono);font-weight:600;font-size:22px;">{{ "{:,}".format(funnel.begin_checkouts) }}</div>
             <div class="sub">{% if funnel.checkout_rate is not none %}{{ funnel.checkout_rate }}%{% else %}—{% endif %}</div>
         </div>
         <div style="color:var(--muted);font-size:18px;">→</div>
-        <div class="funnel-step" style="text-align:center;">
+        <div class="funnel-step{% if funnel.weakest_step == 'purchase' %} weak{% endif %}" style="text-align:center;">
             <div class="sub" style="font-size:12px;">Purchased</div>
             <div style="font-family:var(--mono);font-weight:600;font-size:22px;">{{ "{:,}".format(funnel.purchases) }}</div>
             <div class="sub">{% if funnel.purchase_rate is not none %}{{ funnel.purchase_rate }}%{% else %}—{% endif %}</div>
@@ -127,6 +139,7 @@
         </tbody>
     </table>
     {% endif %}
+    <p class="sub" style="margin-top:8px;"><strong>Note:</strong> "New Customers" above counts first-time buyers only (from Shopify). "Purchased" in the funnel counts all GA4 purchase events including repeat buyers — these will differ.</p>
     {% else %}
     <div class="empty-state">
         <p class="sub">No GA4 data yet. Wire <code>GA4_PROPERTY_ID</code> and <code>GOOGLE_APPLICATION_CREDENTIALS</code> to start the funnel feed.</p>
@@ -180,6 +193,68 @@
     {% else %}
     <div class="empty-state">
         <p class="sub">No Omnisend data yet. Wire <code>OMNISEND_API_KEY</code> to start the email feed.</p>
+    </div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2 id="meta-ads">Meta Ads <a href="/ads" class="ghost" style="font-size:12px;font-weight:400;margin-left:8px;">Full breakdown →</a></h2>
+    {% if meta.has_data %}
+    <div class="cards" style="gap:12px;margin-bottom:12px;">
+        <div class="card stat">
+            <div class="label">Spend</div>
+            <div class="num">${{ "%.0f"|format(meta.spend) }}</div>
+        </div>
+        <div class="card stat">
+            <div class="label">Impressions</div>
+            <div class="num">{{ "{:,}".format(meta.impressions) }}</div>
+        </div>
+        <div class="card stat">
+            <div class="label">Clicks</div>
+            <div class="num">{{ "{:,}".format(meta.clicks) }}</div>
+        </div>
+        <div class="card stat">
+            <div class="label">CTR</div>
+            <div class="num">{% if meta.ctr is not none %}{{ meta.ctr }}%{% else %}—{% endif %}</div>
+        </div>
+        <div class="card stat">
+            <div class="label">CPC</div>
+            <div class="num">{% if meta.cpc is not none %}${{ "%.2f"|format(meta.cpc) }}{% else %}—{% endif %}</div>
+        </div>
+        <div class="card stat">
+            <div class="label">CPM</div>
+            <div class="num">{% if meta.cpm is not none %}${{ "%.2f"|format(meta.cpm) }}{% else %}—{% endif %}</div>
+        </div>
+        <div class="card stat">
+            <div class="label">Meta purchases <sup title="As reported by Meta — estimated">~</sup></div>
+            <div class="num">{{ meta.purchases }}</div>
+        </div>
+        <div class="card stat">
+            <div class="label">Meta ROAS <sup title="As reported by Meta — estimated. Compare to blended MER above.">~</sup></div>
+            <div class="num">{% if meta.roas is not none %}{{ meta.roas }}x{% else %}—{% endif %}</div>
+        </div>
+    </div>
+    <p class="sub"><sup>~</sup> Meta purchases and ROAS are as reported by Meta's attribution model — estimated, not Shopify hard counts. The blended MER above is the ground truth for total ad efficiency.</p>
+    {% if meta_campaigns %}
+    <h3 style="font-size:13px;font-weight:600;margin:12px 0 6px;">By campaign / ad set</h3>
+    <table class="data-table">
+        <thead><tr><th>Campaign</th><th>Ad Set</th><th class="num">Spend</th><th class="num">Purchases <sup>~</sup></th><th class="num">CPA <sup>~</sup></th><th class="num">ROAS <sup>~</sup></th></tr></thead>
+        <tbody>
+        {% for r in meta_campaigns %}
+        <tr>
+            <td>{{ r.campaign }}</td><td>{{ r.adset }}</td>
+            <td class="num">${{ "%.0f"|format(r.spend) }}</td>
+            <td class="num">{{ r.purchases }}</td>
+            <td class="num">{% if r.cpa is not none %}${{ "%.0f"|format(r.cpa) }}{% else %}—{% endif %}</td>
+            <td class="num">{% if r.roas is not none %}{{ r.roas }}x{% else %}—{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+    {% else %}
+    <div class="empty-state">
+        <p class="sub">No Meta data yet. Wire <code>META_ACCESS_TOKEN</code> and <code>META_ACCOUNT_ID</code> to start the ads feed.</p>
     </div>
     {% endif %}
 </div>
@@ -256,7 +331,7 @@
     </div>
     {% for m in trend %}
     <div class="bar-row">
-        <span class="bar-label">{% if notes_by_month.get(m.label) %}<i class="anno-dot" title="{{ notes_by_month[m.label]|map(attribute='note')|join(' / ') }}"></i>{% endif %}{{ m.label }}</span>
+        <span class="bar-label">{% if notes_by_month.get(m.label) %}<i class="anno-dot" title="{{ notes_by_month[m.label]|map(attribute='note')|join(' / ') }}"></i>{% endif %}{{ m.label }}{% if launch_date and m.label == launch_date.strftime("%b %Y") %}<span class="launch-tag">launch</span>{% endif %}</span>
         <span class="bar-track"><span class="bar" style="width: {{ 100 * m.mrr / trend_max }}%"></span></span>
         <span class="bar-val">${{ "%.0f"|format(m.mrr) }}</span>
     </div>
@@ -297,7 +372,7 @@
     <h2 id="collected">Revenue by month</h2>
     {% for m in revenue %}
     <div class="bar-row">
-        <span class="bar-label">{{ m.month }}</span>
+        <span class="bar-label">{{ m.month }}{% if launch_date and m.month == launch_date.strftime("%Y-%m") %}<span class="launch-tag">launch</span>{% endif %}</span>
         <span class="bar-track"><span class="bar" style="width: {{ 100 * m.revenue / (revenue_max or 1) }}%"></span></span>
         <span class="bar-val">${{ "%.0f"|format(m.revenue) }} <span class="sub">({{ m.orders }})</span></span>
     </div>

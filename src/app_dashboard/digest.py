@@ -110,12 +110,27 @@ def _days(value) -> str:
     return f"{value}d"
 
 
-def render_digest(data: dict, app_name: str = "Densologie") -> str:
+def render_digest(data: dict, app_name: str = "Densologie",
+                  summary_line: str | None = None) -> str:
     """Format the weekly digest as a Slack message."""
+    from app_dashboard.stats import generate_summary, overview_comparison
+
     doc = data["days_of_cover"]
     cover_flag = " :rotating_light:" if doc is not None and doc < 60 else ""
+
+    # Build a quick summary line from the digest data if not provided
+    if summary_line is None:
+        stats_dict = {
+            "revenue": data.get("revenue_7d"),
+            "new_customers": data.get("new_customers", 0),
+            "blended_cac": data.get("blended_cac"),
+            "mer": data.get("mer"),
+        }
+        summary_line = generate_summary(stats_dict, {}, 7)
+
     lines = [
         f"*{app_name} Scoreboard — last 7 days*",
+        summary_line,
         (
             f"Revenue {_money(data['revenue_7d'])}"
             f"  ·  New customers {data['new_customers']}"

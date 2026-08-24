@@ -109,7 +109,7 @@ def truncate_tables(conn):
     # Truncate in FK-safe order (children first)
     for table in ("subscription_revenue", "omnisend_sends", "ga4_funnel",
                   "checkouts", "orders", "ad_spend", "customers",
-                  "inventory_levels"):
+                  "inventory_levels", "meta_ad_stats"):
         conn.execute(f"truncate table {table} cascade")
     conn.commit()
     print("Tables truncated.")
@@ -222,10 +222,13 @@ def seed_subscriptions(conn, customers: list[dict]) -> None:
 
     for i, customer in enumerate(subscribers):
         amount = RNG.choices(SUB_AMOUNTS, weights=[40, 40, 20])[0]
-        # Subscription starts within 7 days of first order
-        converted_at = customer["first_order_at"] + timedelta(
-            days=RNG.randint(0, 7), hours=RNG.randint(0, 23)
+        # Spread subscriptions evenly so every window (7d/30d/90d) has meaningful coverage
+        converted_at_offset = timedelta(
+            days=RNG.randint(0, DAYS - 1),
+            hours=RNG.randint(0, 23),
+            minutes=RNG.randint(0, 59),
         )
+        converted_at = ts(BASE_DATE, 0, 0) + converted_at_offset
 
         # ~25% of subscribers churn within the 90-day window
         churned_at = None
@@ -427,6 +430,45 @@ def main() -> int:
     conn.commit()
     omni_count = conn.execute("select count(*) from omnisend_sends").fetchone()[0]
     print(f"  {omni_count} omnisend_sends rows inserted.")
+
+    # ── Meta ad stats (campaign/adset/ad level) ────────────────────────────────
+    print("  Seeding Meta ad stats...")
+    META_CAMPAIGN = {"id": "camp_asc_01", "name": "DSL \u2013 Advantage+ Shopping"}
+    META_ADSETS = [
+        {"id": "adset_meredith", "name": "Meredith \u2013 Hair Loss Concern"},
+        {"id": "adset_professional", "name": "Professional Women 35-55"},
+        {"id": "adset_retarget", "name": "Retargeting \u2013 Site Visitors"},
+    ]
+    META_ADS = [
+        {"id": "ad_001", "name": "Before/After \u2013 90 Day Results", "thumb": "https://placehold.co/60x60/222/fff?text=Ad1", "url": "https://www.facebook.com/adsmanager"},
+        {"id": "ad_002", "name": "UGC \u2013 Meredith Testimonial 30s", "thumb": "https://placehold.co/60x60/333/fff?text=Ad2", "url": "https://www.facebook.com/adsmanager"},
+        {"id": "ad_003", "name": "Clinical Study Stats \u2013 Static", "thumb": "https://placehold.co/60x60/444/fff?text=Ad3", "url": "https://www.facebook.com/adsmanager"},
+        {"id": "ad_004", "name": "Lifestyle \u2013 Morning Routine", "thumb": "https://placehold.co/60x60/555/fff?text=Ad4", "url": "https://www.facebook.com/adsmanager"},
+        {"id": "ad_005", "name": "Product Explainer \u2013 Serum 15s", "thumb": "https://placehold.co/60x60/666/fff?text=Ad5", "url": "https://www.facebook.com/adsmanager"},
+    ]
+
+    for day_offset in range(DAYS):
+        day = BASE_DATE + timedelta(days=day_offset)
+        is_weekend = (BASE_DATE + timedelta(days=day_offset)).weekday() >= 5
+        for adset in META_ADSETS:
+            for ad in META_ADS:
+                base_spend = Decimal(str(round(RNG.uniform(8, 35) * (0.8 if is_weekend else 1.0), 2)))
+                impr = int(float(base_spend) * RNG.uniform(200, 500))
+                clicks = int(impr * RNG.uniform(0.01, 0.04))
+                purchases = int(clicks * RNG.uniform(0.01, 0.05))
+                pv = Decimal(str(round(purchases * float(RNG.choice([149.0, 228.0, 99.0])), 2)))
+                conn.execute(
+                    "insert into meta_ad_stats "
+                    "(date, campaign_id, campaign_name, adset_id, adset_name, ad_id, ad_name, "
+                    "spend, impressions, clicks, purchases, purchase_value, thumbnail_url, ads_manager_url) "
+                    "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) on conflict do nothing",
+                    (day, META_CAMPAIGN["id"], META_CAMPAIGN["name"],
+                     adset["id"], adset["name"], ad["id"], ad["name"],
+                     base_spend, impr, clicks, purchases, pv, ad["thumb"], ad["url"]),
+                )
+    conn.commit()
+    meta_rows = conn.execute("select count(*) from meta_ad_stats").fetchone()[0]
+    print(f"  {meta_rows} meta_ad_stats rows inserted.")
 
     conn.close()
     print("\nSeed complete. Run check_invariants.py to verify.")
