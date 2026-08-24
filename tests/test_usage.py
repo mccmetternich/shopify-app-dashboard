@@ -234,7 +234,10 @@ def test_a_shop_gid_must_be_a_shop_gid():
     set of junk keys. The cap keys on this value, so without a shape check the
     'per-shop flood ceiling' bounds nothing: 500 fresh strings in one batch all
     get their own allowance."""
-    for bad in ("x", "'; drop table shops; --", "gid://shopify/Customer/1",
+    # Customer GIDs are now accepted (B7: survey_response uses Customer GIDs)
+    # but arbitrary strings, SQL injections, and malformed GIDs are still rejected.
+    for bad in ("x", "'; drop table shops; --",
+                "gid://shopify/Order/1",       # Order GID not in allowlist
                 "gid://shopify/Shop/", "gid://shopify/Shop/abc", " gid://shopify/Shop/1"):
         with pytest.raises(UsageError) as e:
             parse_batch(_body(_event(shop_gid=bad)), now=NOW)

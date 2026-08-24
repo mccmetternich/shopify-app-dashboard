@@ -1,592 +1,338 @@
-"""Fill a database with a synthetic app's history, so the dashboard can be run
-without a Partner API token.
+"""Seed a database with 90 days of synthetic Densologie DTC data.
 
-Every merchant here is invented. Domains are prefixed `demo-` so a screenshot or
-a shared screen can never be mistaken for somebody's real install base, and the
-uninstall reasons are Shopify's own pick-list strings (including the localised
-ones) so the normaliser has something real to normalise.
+Inserts directly into the four Phase A tables (customers, orders, ad_spend,
+subscription_revenue) so the dashboard can be exercised without a live
+Shopify webhook or ad platform credentials.
 
-It writes through the same functions the live pipeline uses -- upsert_raw_events,
-upsert_charges, upsert_transactions, then derive_installation -- rather than
-inserting derived rows directly. A seeder that wrote `subscriptions` itself could
-produce a dashboard the real code path cannot, which would make it a liar.
+Every customer name and email is invented. Emails are stored only as
+SHA-256 hashes — the raw address never touches the database.
 
-    createdb app_dashboard_demo
-    DATABASE_URL=postgresql://localhost:5432/app_dashboard_demo \
-    PARTNER_API_TOKEN=unused PARTNER_ORG_ID=0 PARTNER_APP_ID=0 \
-    DASHBOARD_USERS=demo:demo-only-not-a-password \
-    PUBLIC_BASE_URL=http://localhost:8000 GOOGLE_ALLOWED_DOMAINS=example.com \
-    ANNUAL_PLAN_AMOUNTS=190.00 NO_SCHEDULER=1 \
+Usage:
+
+    createdb densologie_demo
+    DATABASE_URL=postgresql://localhost:5432/densologie_demo \\
+    DASHBOARD_USERS=demo:demo-only-not-a-password \\
+    PUBLIC_BASE_URL=http://localhost:8000 \\
+    NO_SCHEDULER=1 \\
       uv run python scripts/seed_demo.py --yes
 
-It TRUNCATES every table it seeds, so it refuses to run without --yes and prints
-the database it is about to overwrite first.
+Appends to an already-seeded database unless --truncate is also passed.
 """
 
 import argparse
+import hashlib
+import math
+import os
 import random
-import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from urllib.parse import urlparse
 
-from app_dashboard.config import get_settings
-from app_dashboard.db import connect, run_migrations
-from app_dashboard.derive import derive_installation
-from app_dashboard.ingest_raw import upsert_charges, upsert_raw_events, upsert_transactions
-from app_dashboard.uninstall_reasons import classify
+import psycopg
 
-# Fixed so two runs produce the same dashboard: a screenshot in the README
-# should still match the thing it documents a month later.
+# ── Constants ────────────────────────────────────────────────────────────────
+
+# Fixed seed: two runs produce the same dashboard so screenshots remain valid.
 RNG = random.Random(20260809)
 
-MONTHS_OF_HISTORY = 22
-SHOP_COUNT = 190
+DAYS = 90          # window of synthetic history
+BASE_DATE = date(2026, 5, 25)   # first day of the seeded window
 
-# Plans. The annual one has to appear in ANNUAL_PLAN_AMOUNTS or it is counted as
-# monthly, at twelve times its true MRR -- the failure this seeder is also a
-# demonstration of.
-MONTHLY = Decimal("19.00")
-PLUS = Decimal("49.00")
-ANNUAL = Decimal("190.00")
-
-# Shopify's billing processing fee is not a flat rate: identically priced charges
-# settle differently per merchant. Each shop draws one and keeps it.
-FEE_RATES = [Decimal("0.02895"), Decimal("0.04895"), Decimal("0.05895")]
-
-FIRST = [
-    "North Loop", "Harbour", "Copperline", "Fieldnote", "Wolf & Kin", "Ninth Street",
-    "Tallgrass", "Bright Anchor", "Cedar Fork", "Lantern", "Quiet Coast", "Ridgeway",
-    "Marlow", "Saltbox", "Pinehurst", "Ember", "Foxglove", "Granite Bay", "Halyard",
-    "Junco", "Kestrel", "Longwater", "Meridian", "Nightjar", "Overland", "Prairie",
-    "Quarry", "Redwing", "Stonecrop", "Thistle", "Umber", "Verdant", "Wayfare",
-    "Yarrow", "Zephyr", "Blue Heron", "Clearwater", "Driftwood", "Elmsworth",
-]
-SECOND = [
-    "Supply", "Goods", "Works", "Trading Co", "Provisions", "Mercantile", "Studio",
-    "Outfitters", "Collective", "Apothecary", "Bakehouse", "Coffee", "Cyclery",
-    "Home", "Kitchen", "Paper", "Press", "Roasters", "Textiles", "Woodshop",
+# Densologie SKU universe ────────────────────────────────────────────────────
+SKUS = [
+    {"sku": "DSL-SERUM-30ML",   "title": "TRICHOGENESIS Hair Serum 30ml",    "price": Decimal("149.00")},
+    {"sku": "DSL-CAPS-60",      "title": "TRICHOGENESIS Capsules 60ct",       "price": Decimal("99.00")},
+    {"sku": "DSL-BUNDLE-SYS",   "title": "TRICHOGENESIS System Bundle",       "price": Decimal("228.00")},
+    {"sku": "DSL-SERUM-60ML",   "title": "TRICHOGENESIS Hair Serum 60ml",     "price": Decimal("228.00")},
+    {"sku": "DSL-BUNDLE-3MO",   "title": "TRICHOGENESIS 3-Month Supply",      "price": Decimal("594.00")},
 ]
 
-COUNTRIES = (
-    ["US"] * 46 + ["GB"] * 12 + ["CA"] * 10 + ["AU"] * 8 + ["DE"] * 5 + ["NL"] * 3
-    + ["FR"] * 3 + ["SE"] * 2 + ["JP"] * 2 + ["BR"] * 2 + ["DK"] * 2 + ["IE", "NZ", "SG"]
-)
-INDUSTRIES = [
-    "Apparel & Accessories", "Home & Garden", "Health & Beauty", "Food & Drink",
-    "Sporting Goods", "Toys & Games", "Electronics", "Arts & Crafts", "Pet Supplies",
+# Subscription amounts (monthly billing; bundle subscribers get auto-enrolled)
+SUB_AMOUNTS = [Decimal("99.00"), Decimal("149.00"), Decimal("228.00")]
+
+# Ad campaigns ───────────────────────────────────────────────────────────────
+CAMPAIGNS = [
+    {"id": "meta_prospe_01",  "name": "Meta – Prospecting",   "platform": "meta",   "daily_base": Decimal("100.00")},
+    {"id": "meta_retarg_01",  "name": "Meta – Retargeting",   "platform": "meta",   "daily_base": Decimal("80.00")},
+    {"id": "google_brand_01", "name": "Google – Branded",     "platform": "google", "daily_base": Decimal("70.00")},
 ]
 
-# Shopify's own wording, in the languages it serves the pick-list in. Weighted so
-# the chart has a shape rather than nine equal bars.
-REASONS = (
-    ["Not using app now"] * 14
-    + ["App wird derzeit nicht genutzt", "現在アプリを使用していない", "Bruger ikke appen i øjeblikket"]
-    + ["Testing multiple apps"] * 9
-    + ["Testen mehrerer Apps"]
-    + ["Limited or missing features"] * 8
-    + ["Begrænsede eller manglende funktioner"]
-    + ["Not working properly with store"] * 6
-    + ["Not working or compatible with store"] * 3
-    + ["Too expensive"] * 6
-    + ["Store is closing or pausing"] * 4
-    + ["Hard to set up or use"] * 3
-    + ["Not satisfied with app features"] * 3
-    + ["アプリの機能に満足できなかった"]
-    + ["Not satisfied with support"] * 2
-    + ["Other (please specify)"] * 4
-    # An unmapped string, on purpose: the point of the Unclassified bucket is
-    # that a wording Shopify has not shown us yet stays visible.
-    + ["Switching to a different solution"]
-)
-
-# Free text, keyed by the bucket the reason lands in, so a verbatim never
-# contradicts the reason it is filed under. A demo dataset that files "the store
-# is closing" under "too expensive" teaches the reader to distrust the page.
-VERBATIMS = {
-    "Not using app now": [
-        "Didn't have the volume to justify it yet, will be back for Q4.",
-        "Seasonal store, we reinstall every October.",
-        "Ran one campaign and haven't needed it since.",
-    ],
-    "Too expensive": [
-        "Trialling three of these at once and yours was the most expensive.",
-        "Fine at $19, not at $49 for the volume we do.",
-        "Cheaper to build it into the theme ourselves.",
-    ],
-    "Limited or missing features": [
-        "Needed multi-currency and it wasn't there.",
-        "No way to schedule an offer to end at midnight.",
-        "We needed per-collection rules, not per-product.",
-    ],
-    "Not working with store": [
-        "Couldn't get it to show on the cart drawer with our theme.",
-        "Conflicted with our bundles app, both tried to edit the cart.",
-        "Broke on mobile after the last theme update.",
-    ],
-    "Store closing or pausing": [
-        "Store is closing, nothing to do with the app.",
-        "Pausing the business until spring.",
-    ],
-    "Hard to set up or use": [
-        "Too many clicks to build one offer.",
-        "Gave up on the setup, no idea what half the settings did.",
-    ],
-    "Not satisfied with features": [
-        "It works, it just doesn't do the one thing we bought it for.",
-        "The reporting is thinner than the screenshots suggested.",
-    ],
-    "Not satisfied with support": [
-        "Support answered fast, but the feature we needed is on your roadmap and not in the app.",
-        "Three days for a first reply during BFCM.",
-    ],
-    "Testing multiple apps": [
-        "Comparison shopping, nothing against yours.",
-        "Kept the one our agency already knew.",
-    ],
-    "Other": [
-        "Changed our whole promo strategy, this no longer fits it.",
-        "Migrating off Shopify.",
-    ],
-}
-
-ANNOTATIONS = [
-    (300, "Listing rewrite went live: new hero, three screenshots, keyword pass."),
-    (232, "Free plan removed. Installs dropped, paid conversion roughly doubled."),
-    (168, "Annual plan launched at $190."),
-    (104, "Shopify made the uninstall reason question mandatory. Reason coverage jumps here."),
-    (47, "$49 tier launched for stores over 5k orders/mo."),
-    (12, "Featured in a Shopify collection for two weeks."),
+# UTM sources for organic / paid traffic
+UTM_SOURCES = [
+    None,                                          # organic (no UTM)
+    {"utm_source": "meta",   "utm_medium": "paid_social", "utm_campaign": "prospe_01"},
+    {"utm_source": "meta",   "utm_medium": "paid_social", "utm_campaign": "retarg_01"},
+    {"utm_source": "google", "utm_medium": "cpc",         "utm_campaign": "brand_01"},
+    {"utm_source": "email",  "utm_medium": "email",       "utm_campaign": "weekly_digest"},
 ]
 
-GA4_SOURCES = [
-    ("google", 0.34), ("apps.shopify.com", 0.27), ("(direct)", 0.16),
-    ("admin.shopify.com", 0.11), ("youtube.com", 0.05), ("reddit.com", 0.04),
-    ("newsletter", 0.03),
-]
-GA4_CHANNELS = [
-    ("Organic Search", 0.38), ("Referral", 0.29), ("Direct", 0.17),
-    ("Organic Social", 0.09), ("Organic Video", 0.07),
-]
+COUNTRIES = ["US", "US", "US", "US", "CA", "GB", "AU"]  # weighted toward US
 
 
-def _slug(name: str) -> str:
-    keep = "".join(c.lower() if c.isalnum() else "-" for c in name)
-    return re.sub(r"-+", "-", keep).strip("-")
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def sha256(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+def fake_email(idx: int) -> str:
+    domains = ["gmail.com", "yahoo.com", "icloud.com", "hotmail.com", "outlook.com"]
+    return f"demo.customer.{idx:04d}@{RNG.choice(domains)}"
 
 
-def _event(shop, kind, when, charge=None, reason=None, description=None):
-    """One raw_app_events row in the exact shape partner_api.fetch_app_events emits."""
-    charge_gid = charge["id"] if charge else None
-    payload = {
-        "type": kind,
-        "occurredAt": _iso(when),
-        "shop": {"id": shop["gid"], "myshopifyDomain": shop["domain"], "name": shop["name"]},
-    }
-    if charge:
-        payload["charge"] = charge
-    if reason:
-        payload["reason"] = reason
-    if description:
-        payload["description"] = description
-    return {
-        "id": f"{shop['gid']}:{kind}:{_iso(when)}:{charge_gid or ''}",
-        "type": kind,
-        "occurred_at": when,
-        "shop_gid": shop["gid"],
-        "charge_gid": charge_gid,
-        "charge": charge,
-        "payload": payload,
-    }
+def poisson_count(lam: float) -> int:
+    """Simple Poisson draw without scipy dependency."""
+    L = math.exp(-lam)
+    k, p = 0, 1.0
+    while p > L:
+        k += 1
+        p *= RNG.random()
+    return k - 1
 
 
-def _charge(shop, index, amount):
-    gid = f"gid://partners/AppSubscription/{shop['n']}{index:02d}"
-    return {
-        "id": gid,
-        "amount": {"amount": str(amount), "currencyCode": "USD"},
-        "name": {MONTHLY: "Monthly", PLUS: "Plus", ANNUAL: "Annual"}[amount],
-        "test": False,
-    }
+def ts(d: date, hour: int = 0, minute: int = 0) -> datetime:
+    return datetime(d.year, d.month, d.day, hour, minute, tzinfo=timezone.utc)
 
 
-def build_shops(now: datetime) -> list[dict]:
-    start = now - timedelta(days=MONTHS_OF_HISTORY * 30)
-    names = set()
-    shops = []
-    for n in range(SHOP_COUNT):
-        while True:
-            name = f"{RNG.choice(FIRST)} {RNG.choice(SECOND)}"
-            if name not in names:
-                names.add(name)
-                break
-        # Installs accelerate: an app that grew looks nothing like one that
-        # arrived all at once, and every retention cohort depends on the shape.
-        share = (RNG.random() ** 0.62)
-        installed = start + timedelta(days=share * MONTHS_OF_HISTORY * 30)
-        shops.append({
-            "n": 1000 + n,
-            "gid": f"gid://shopify/Shop/{60000000 + n * 7}",
-            "name": name,
-            "domain": f"demo-{_slug(name)}.myshopify.com",
-            "installed": installed,
-            "country": RNG.choice(COUNTRIES),
-            "industry": RNG.choice(INDUSTRIES),
-            "fee_rate": RNG.choice(FEE_RATES),
-        })
-    return shops
+def utm_json(utm: dict | None) -> str | None:
+    """Convert a UTM dict to a valid JSON string, or return None for organic."""
+    if utm is None:
+        return None
+    pairs = ", ".join(f'"{k}": "{v}"' for k, v in utm.items())
+    return "{" + pairs + "}"
 
 
-def build_history(shops, now: datetime, mandatory_from: date):
-    """Walk each shop's life and emit its events, charges and transactions."""
-    events, transactions = [], []
-    txn_n = 0
+# ── Seed functions ────────────────────────────────────────────────────────────
 
-    for shop in shops:
-        events.append(_event(shop, "RELATIONSHIP_INSTALLED", shop["installed"]))
-        age_days = (now - shop["installed"]).days
-
-        # Does it ever pay?
-        subscribes = RNG.random() < 0.47 and age_days > 2
-        sub_at = None
-        plan = None
-        charge = None
-        if subscribes:
-            delay = RNG.choice([0, 0, 0, 1, 2, 3, 6, 11, 19, 34])
-            sub_at = shop["installed"] + timedelta(days=delay, hours=RNG.randrange(1, 20))
-            if sub_at >= now:
-                subscribes = False
-            else:
-                plan = RNG.choices([MONTHLY, ANNUAL, PLUS], weights=[74, 18, 8])[0]
-                charge = _charge(shop, 1, plan)
-                events.append(_event(shop, "SUBSCRIPTION_CHARGE_ACTIVATED", sub_at, charge=charge))
-
-        # Plan change: Shopify mints a NEW subscription and cancels the old one.
-        # The originals are kept because the billing history below needs the
-        # price the merchant actually paid before the change.
-        first_plan, first_charge = plan, charge
-        changed_at = None
-        if subscribes and plan == MONTHLY and RNG.random() < 0.16:
-            changed_at = sub_at + timedelta(days=RNG.randrange(45, 400))
-            if changed_at < now - timedelta(days=2):
-                new_plan = RNG.choices([PLUS, ANNUAL], weights=[6, 4])[0]
-                new_charge = _charge(shop, 2, new_plan)
-                events.append(_event(shop, "SUBSCRIPTION_CHARGE_ACTIVATED", changed_at,
-                                     charge=new_charge))
-                events.append(_event(shop, "SUBSCRIPTION_CHARGE_CANCELED",
-                                     changed_at + timedelta(hours=3), charge=charge))
-                charge, plan = new_charge, new_plan
-            else:
-                changed_at = None
-
-        # Cancel without uninstalling: a real and separate population.
-        churn_at = None
-        if subscribes and RNG.random() < 0.19:
-            floor = changed_at or sub_at
-            churn_at = floor + timedelta(days=RNG.randrange(30, 430))
-            if churn_at < now:
-                events.append(_event(shop, "SUBSCRIPTION_CHARGE_CANCELED", churn_at,
-                                     charge=charge))
-            else:
-                churn_at = None
-
-        # Uninstall. Payers leave less often than the never-paid.
-        #
-        # The floor is the shop's last subscription event, not its install date.
-        # Drawing freely from the install date produced histories Shopify cannot
-        # emit -- an uninstall followed by a subscription, with no reinstall in
-        # between -- which derivation faithfully replays into a live
-        # subscription on an uninstalled shop. check_invariants.py caught it.
-        leave_odds = 0.24 if subscribes else 0.52
-        gone_at = None
-        if RNG.random() < leave_odds:
-            floor = max(x for x in (shop["installed"], sub_at, changed_at, churn_at)
-                        if x is not None)
-            span = max(1, (now - floor).days)
-            gone_at = floor + timedelta(days=RNG.randrange(1, span + 1),
-                                        hours=RNG.randrange(0, 24))
-            if gone_at < now:
-                # RELATIONSHIP_DEACTIVATED is a store Shopify closed or froze.
-                # Those merchants never see the exit survey, so they must never
-                # carry a reason -- every coverage figure depends on it.
-                deactivated = RNG.random() < 0.09
-                reason = description = None
-                if not deactivated:
-                    # Optional before Shopify made it mandatory, near-universal after.
-                    answers = RNG.random() < (0.93 if gone_at.date() >= mandatory_from else 0.27)
-                    if answers:
-                        picks = [RNG.choice(REASONS)]
-                        if RNG.random() < 0.14:
-                            picks.append(RNG.choice(REASONS))
-                        reason = ", ".join(dict.fromkeys(picks))
-                        if RNG.random() < 0.28:
-                            bucket, _ = classify(picks[0])
-                            description = RNG.choice(VERBATIMS[bucket]) \
-                                if bucket in VERBATIMS else None
-                events.append(_event(
-                    shop,
-                    "RELATIONSHIP_DEACTIVATED" if deactivated else "RELATIONSHIP_UNINSTALLED",
-                    gone_at, reason=reason, description=description,
-                ))
-                shop["gone_at"] = gone_at
-            else:
-                gone_at = None
-
-        # Money. One transaction per billing period each subscription was live.
-        # Billed as segments rather than as one loop over the final plan: a shop
-        # that changed plans was charged the old price first, and a history that
-        # backdates today's price onto last year is the exact mistake this
-        # dashboard exists to avoid.
-        if subscribes:
-            ends = min(x for x in (churn_at, gone_at, now) if x is not None)
-            segments = []
-            if changed_at:
-                segments.append((sub_at, min(changed_at, ends), first_plan, first_charge))
-                if changed_at < ends:
-                    segments.append((changed_at, ends, plan, charge))
-            else:
-                segments.append((sub_at, ends, plan, charge))
-
-            for seg_start, seg_end, seg_plan, seg_charge in segments:
-                at = seg_start
-                step = timedelta(days=365 if seg_plan == ANNUAL else 30)
-                while at < seg_end:
-                    gross = Decimal(seg_plan)
-                    net = (gross * (1 - shop["fee_rate"])).quantize(Decimal("0.01"))
-                    txn_n += 1
-                    transactions.append({
-                        "id": f"gid://partners/AppSubscriptionSale/{9000000 + txn_n}",
-                        "type": "AppSubscriptionSale",
-                        "created_at": at,
-                        "shop_gid": shop["gid"],
-                        "charge_gid": seg_charge["id"],
-                        "billing_interval": (
-                            "ANNUAL" if seg_plan == ANNUAL else "EVERY_30_DAYS"
-                        ),
-                        "gross_amount": str(gross),
-                        # Shopify's revenue share, 0% under $1M of lifetime
-                        # revenue. The processing fee lives only in the gap
-                        # between gross and net.
-                        "shopify_fee": "0.00",
-                        "net_amount": str(net),
-                        "currency_code": "USD",
-                    })
-                    at += step
-
-            # A refund arrives only as a transaction, never as an app event.
-            if transactions and RNG.random() < 0.05:
-                last = transactions[-1]
-                txn_n += 1
-                transactions.append({
-                    "id": f"gid://partners/AppSaleAdjustment/{9000000 + txn_n}",
-                    "type": "AppSaleAdjustment",
-                    "created_at": last["created_at"] + timedelta(days=RNG.randrange(1, 12)),
-                    "shop_gid": shop["gid"],
-                    "charge_gid": charge["id"],
-                    "billing_interval": None,
-                    "gross_amount": f"-{last['gross_amount']}",
-                    "shopify_fee": "0.00",
-                    "net_amount": f"-{last['net_amount']}",
-                    "currency_code": "USD",
-                })
-
-    events.sort(key=lambda e: e["occurred_at"])
-    return events, transactions
+def truncate_tables(conn):
+    # Truncate in FK-safe order (children first)
+    for table in ("subscription_revenue", "orders", "ad_spend", "customers",
+                  "inventory_levels"):
+        conn.execute(f"truncate table {table} cascade")
+    conn.commit()
+    print("Tables truncated.")
 
 
-def seed_usage(conn, shops, now: datetime, tracking_from: datetime):
-    """Usage events, which the Partner API has none of. A shop that installed
-    before tracking started has no activation event to find, which is why
-    activation reads unknown rather than 0% for the early cohorts."""
-    settings = get_settings()
-    activation = settings.usage_activation_event
-    live = settings.usage_live_event
-    rows = []
-    n = 0
-    for shop in shops:
-        if shop["installed"] < tracking_from:
-            continue
-        end = shop.get("gone_at") or now
-        first = shop["installed"] + timedelta(hours=RNG.randrange(1, 96))
-        if first >= end or RNG.random() > 0.68:
-            continue
-        n += 1
-        rows.append((shop["gid"], f"demo-{n}-a", "settings_completed", first, "{}"))
-        n += 1
-        rows.append((shop["gid"], f"demo-{n}-b", activation,
-                     first + timedelta(hours=RNG.randrange(1, 30)), "{}"))
-        if RNG.random() < 0.74:
-            at = first + timedelta(days=RNG.randrange(1, 6))
-            for _ in range(RNG.randrange(2, 9)):
-                if at >= end:
-                    break
-                n += 1
-                rows.append((shop["gid"], f"demo-{n}-c", live, at, "{}"))
-                at += timedelta(days=RNG.randrange(2, 30))
-    with conn.cursor() as cur:
-        # received_at is set explicitly, not left to its now() default. The
-        # activation reports take min(received_at) as the day tracking started
-        # and only count shops that installed after it, so defaulted rows put
-        # that boundary at this instant and every activation figure reads 0% of
-        # 0 shops. Posting as it happens is also what a real integration does.
-        cur.executemany(
-            """insert into usage_events
-                   (shop_gid, event_id, event_type, occurred_at, properties, received_at)
-               values (%s, %s, %s, %s, %s, %s) on conflict do nothing""",
-            [(*row, row[3]) for row in rows],
+def seed_customers(conn, count: int) -> list[dict]:
+    """Create `count` synthetic customers and return their records."""
+    customers = []
+    for i in range(count):
+        email = fake_email(i)
+        cid = f"cust_{i:05d}"
+        # Skew first orders toward earlier cohorts (natural accumulation)
+        first_order_day = BASE_DATE + timedelta(
+            days=int(RNG.betavariate(0.8, 3) * DAYS)
+        )
+        country = RNG.choice(COUNTRIES)
+        rec = {
+            "id": cid,
+            "email_hash": sha256(email),
+            "first_order_at": ts(first_order_day, RNG.randint(6, 22), RNG.randint(0, 59)),
+            "country": country,
+        }
+        customers.append(rec)
+        conn.execute(
+            "insert into customers (id, email_hash, first_order_at, country) "
+            "values (%(id)s, %(email_hash)s, %(first_order_at)s, %(country)s) "
+            "on conflict (id) do nothing",
+            rec,
         )
     conn.commit()
-    return len(rows)
+    return customers
 
 
-def seed_ga4(conn, now: datetime, days: int = 400):
-    """App Store listing traffic. The Partner API exposes none of this at all."""
-    rows = []
-    for i in range(days):
-        day = (now - timedelta(days=i)).date()
-        weekday = day.weekday()
-        # Scaled so listing installs land near the install count in the event
-        # feed. GA4 and the Partner API never agree exactly, which is the point
-        # of the reconciliation panel, but an order of magnitude apart would be
-        # a broken demo rather than an instructive disagreement.
-        base = 44 + i * -0.05 + (7 if weekday < 5 else -9) + RNG.randrange(-8, 9)
-        sessions = max(6, int(base))
-        users = int(sessions * RNG.uniform(0.82, 0.94))
-        clicks = int(sessions * RNG.uniform(0.035, 0.075))
-        installs = 1 if RNG.random() < 0.34 else 0
-        rows.append((day, "total", "", sessions, users, clicks, installs, 0))
-        for dim, table in (("source", GA4_SOURCES), ("channel", GA4_CHANNELS)):
-            for value, share in table:
-                s = int(sessions * share * RNG.uniform(0.8, 1.2))
-                if s < 1:
-                    continue
-                rows.append((day, dim, value, s, int(s * 0.88),
-                             int(s * RNG.uniform(0.03, 0.08)),
-                             1 if RNG.random() < 0.05 else 0, 0))
-        for value, share in (("US", 0.47), ("GB", 0.12), ("CA", 0.1), ("AU", 0.08),
-                             ("DE", 0.06), ("NL", 0.04), ("IN", 0.04)):
-            s = int(sessions * share * RNG.uniform(0.8, 1.2))
-            if s < 1:
-                continue
-            rows.append((day, "country", value, s, int(s * 0.9),
-                         int(s * RNG.uniform(0.03, 0.08)),
-                         1 if RNG.random() < 0.05 else 0, 0))
-    with conn.cursor() as cur:
-        cur.executemany(
-            """insert into ga4_daily
-                   (date, dimension, value, sessions, users, add_app_clicks, installs, ad_clicks)
-               values (%s, %s, %s, %s, %s, %s, %s, %s)
-               on conflict (date, dimension, value) do nothing""",
-            rows,
-        )
-    conn.commit()
-    return len(rows)
+def seed_orders(conn, customers: list[dict]) -> None:
+    """Seed ~3 orders/day with realistic Densologie SKU distribution."""
+    order_idx = 0
+    # Build a set of customer IDs who have had at least one order (for new-flag tracking)
+    seen_customers: set[str] = set()
 
+    for day_offset in range(DAYS):
+        d = BASE_DATE + timedelta(days=day_offset)
+        n_orders = poisson_count(3.0)   # λ=3 → ~3 orders/day average
+        for _ in range(n_orders):
+            customer = RNG.choice(customers)
+            sku_rec = RNG.choices(SKUS, weights=[35, 30, 20, 10, 5])[0]
+            order_hour = RNG.randint(6, 23)
+            order_minute = RNG.randint(0, 59)
+            created_at = ts(d, order_hour, order_minute)
 
-def seed_side_tables(conn, shops, now: datetime):
-    """Country and industry (the CSV importer's job in real life), a few review
-    dates, and the annotations that say why the chart moved."""
-    with conn.cursor() as cur:
-        cur.executemany(
-            """update shops set country = %s, industry = %s where shop_gid = %s""",
-            [(s["country"], s["industry"], s["gid"]) for s in shops],
-        )
-        reviewed = [s for s in shops if RNG.random() < 0.06 and "gone_at" not in s][:11]
-        cur.executemany(
-            "update shops set reviewed_at = %s where shop_gid = %s",
-            [((now - timedelta(days=RNG.randrange(20, 500))).date(), s["gid"])
-             for s in reviewed],
-        )
-        cur.executemany(
-            "insert into annotations (on_date, note, author) values (%s, %s, %s)",
-            [((now - timedelta(days=ago)).date(), note, "demo@example.com")
-             for ago, note in ANNOTATIONS],
-        )
-    conn.commit()
-    return len(reviewed)
+            is_new = customer["id"] not in seen_customers
+            seen_customers.add(customer["id"])
 
+            # ~2% refund rate
+            refunded = sku_rec["price"] if RNG.random() < 0.02 else Decimal("0.00")
 
-def wipe(conn):
-    tables = [
-        "raw_app_events", "app_events", "charges", "subscriptions", "shops",
-        "transactions", "usage_events", "ga4_daily", "annotations",
-        "tracking_events", "sync_state",
-    ]
-    conn.execute(f"truncate {', '.join(tables)} restart identity cascade")
+            utm = RNG.choices(UTM_SOURCES, weights=[40, 25, 20, 10, 5])[0]
+
+            order_id = f"ord_{order_idx:06d}"
+            order_idx += 1
+
+            conn.execute(
+                "insert into orders "
+                "(id, customer_id, created_at, total, refunded, currency, "
+                " is_new_customer, line_items, source_utm) "
+                "values (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb) "
+                "on conflict (id) do nothing",
+                (
+                    order_id,
+                    customer["id"],
+                    created_at,
+                    sku_rec["price"],
+                    refunded,
+                    "USD",
+                    is_new,
+                    f'[{{"sku":"{sku_rec["sku"]}","title":"{sku_rec["title"]}",'
+                    f'"quantity":1,"unit_price":{float(sku_rec["price"])}}}]',
+                    utm_json(utm),
+                ),
+            )
     conn.commit()
 
+
+def seed_ad_spend(conn) -> None:
+    """Insert daily ad spend for each campaign with realistic variance."""
+    for day_offset in range(DAYS):
+        d = BASE_DATE + timedelta(days=day_offset)
+        is_weekend = d.weekday() >= 5
+        for camp in CAMPAIGNS:
+            # Weekend spend is 20% lower; add ±15% jitter
+            base = camp["daily_base"] * (Decimal("0.80") if is_weekend else Decimal("1.00"))
+            jitter = Decimal(str(round(RNG.uniform(0.85, 1.15), 4)))
+            spend = round(base * jitter, 2)
+
+            impressions = int(spend * RNG.uniform(80, 130))
+            clicks = int(impressions * RNG.uniform(0.01, 0.03))
+
+            conn.execute(
+                "insert into ad_spend "
+                "(date, campaign_id, campaign_name, platform, spend, impressions, clicks) "
+                "values (%s, %s, %s, %s, %s, %s, %s) "
+                "on conflict (date, campaign_id) do nothing",
+                (d, camp["id"], camp["name"], camp["platform"], spend, impressions, clicks),
+            )
+    conn.commit()
+
+
+def seed_subscriptions(conn, customers: list[dict]) -> None:
+    """Seed subscriptions: ~60% of customers, realistic churn over 90 days."""
+    subscribers = [c for c in customers if RNG.random() < 0.60]
+
+    for i, customer in enumerate(subscribers):
+        amount = RNG.choices(SUB_AMOUNTS, weights=[40, 40, 20])[0]
+        # Subscription starts within 7 days of first order
+        converted_at = customer["first_order_at"] + timedelta(
+            days=RNG.randint(0, 7), hours=RNG.randint(0, 23)
+        )
+
+        # ~25% of subscribers churn within the 90-day window
+        churned_at = None
+        if RNG.random() < 0.25:
+            # Churn happens 14–75 days after subscription start
+            churn_offset = timedelta(days=RNG.randint(14, 75))
+            churned_at = converted_at + churn_offset
+            # Don't let churned_at exceed window end
+            window_end = ts(BASE_DATE + timedelta(days=DAYS - 1), 23, 59)
+            if churned_at > window_end:
+                churned_at = None   # still active at window end
+
+        sub_id = f"sub_{i:05d}"
+        conn.execute(
+            "insert into subscription_revenue "
+            "(id, customer_id, monthly_amount, converted_at, churned_at) "
+            "values (%s, %s, %s, %s, %s) "
+            "on conflict (id) do nothing",
+            (sub_id, customer["id"], amount, converted_at, churned_at),
+        )
+    conn.commit()
+
+
+def seed_inventory(conn) -> None:
+    """Seed inventory_levels with the serum SKU.
+
+    The serum is the highest-revenue SKU and the one the Phase C days-of-cover
+    tile will track. ~800 units on hand is a realistic starting point for a
+    brand doing ~3 orders/day with a mix of SKUs.
+
+    Formula for Phase C:
+        days_of_cover = units_on_hand / (units_sold_last_14d / 14)
+    Red flag threshold: < 60 days (reorder lead time + buffer).
+    """
+    conn.execute(
+        """
+        insert into inventory_levels (sku, units_on_hand, updated_at)
+        values (%s, %s, now())
+        on conflict (sku) do update set
+            units_on_hand = excluded.units_on_hand,
+            updated_at    = excluded.updated_at
+        """,
+        ("HAIR-SERUM-50ML", 800),
+    )
+    conn.commit()
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--yes", action="store_true",
-                        help="required: this truncates every table in DATABASE_URL")
+                        help="Confirm you want to write to the database.")
+    parser.add_argument("--truncate", action="store_true",
+                        help="Truncate all seeded tables before inserting.")
+    parser.add_argument("--customers", type=int, default=250,
+                        help="Number of synthetic customers to create (default: 250).")
     args = parser.parse_args()
 
-    settings = get_settings()
-    target = urlparse(settings.database_url)
-    where = f"{target.hostname or 'localhost'}{target.path}"
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        print("DATABASE_URL is not set.", file=sys.stderr)
+        return 2
+
+    db_name = urlparse(url).path.lstrip("/")
+    print(f"Target database: {db_name}")
     if not args.yes:
-        print(f"Refusing to run. This TRUNCATES every table in {where}.")
-        print("Re-run with --yes if that is the database you meant.")
-        return 2
+        print("Pass --yes to confirm you want to write to this database.")
+        return 1
 
-    if not settings.annual_plan_amounts_set:
-        print("ANNUAL_PLAN_AMOUNTS is empty, so the $190 annual plan in this dataset")
-        print("would be counted as monthly, at 12x its real MRR. Set ANNUAL_PLAN_AMOUNTS=190.00")
-        print("and run again.")
-        return 2
-
-    print(f"Seeding {where} ...")
-    conn = connect()
+    from app_dashboard.db import run_migrations
+    conn = psycopg.connect(url)
     run_migrations(conn)
-    wipe(conn)
 
-    now = datetime.now(timezone.utc)
-    mandatory_from = settings.reason_mandatory_from
-    shops = build_shops(now)
-    events, transactions = build_history(shops, now, mandatory_from)
+    if args.truncate:
+        truncate_tables(conn)
 
-    upsert_charges(conn, events)
-    raw = upsert_raw_events(conn, events)
-    txns = upsert_transactions(conn, transactions)
+    print(f"Seeding {args.customers} customers over {DAYS} days...")
 
-    for shop in shops:
-        derive_installation(conn, shop["gid"])
+    customers = seed_customers(conn, args.customers)
+    print(f"  {len(customers)} customers inserted.")
 
-    usage = seed_usage(conn, shops, now, now - timedelta(days=250))
-    ga4 = seed_ga4(conn, now)
-    reviewed = seed_side_tables(conn, shops, now)
+    seed_orders(conn, customers)
+    order_count = conn.execute("select count(*) from orders").fetchone()[0]
+    print(f"  {order_count} orders inserted (~{order_count/DAYS:.1f}/day).")
 
-    conn.execute(
-        "insert into sync_state (source, cursor, last_synced_at) values (%s, null, now())"
-        " on conflict (source) do update set last_synced_at = now()",
-        ("partner_api",),
-    )
-    conn.commit()
+    seed_ad_spend(conn)
+    spend_rows = conn.execute("select count(*) from ad_spend").fetchone()[0]
+    total_spend = conn.execute("select sum(spend) from ad_spend").fetchone()[0]
+    print(f"  {spend_rows} ad_spend rows inserted (total spend ${total_spend:,.2f}).")
 
-    (installed,) = conn.execute(
-        "select count(*) from shops where install_state = 'installed'"
+    seed_subscriptions(conn, customers)
+    sub_count = conn.execute("select count(*) from subscription_revenue").fetchone()[0]
+    active_count = conn.execute(
+        "select count(*) from subscription_revenue where churned_at is null"
+    ).fetchone()[0]
+    print(f"  {sub_count} subscriptions inserted ({active_count} active).")
+
+    seed_inventory(conn)
+    inv_row = conn.execute(
+        "select sku, units_on_hand from inventory_levels where sku = 'HAIR-SERUM-50ML'"
     ).fetchone()
-    (mrr,) = conn.execute(
-        """select coalesce(sum(s.monthly_amount), 0) from subscriptions s
-           join shops sh on sh.shop_gid = s.shop_gid
-           where s.churned_at is null and sh.install_state = 'installed'"""
-    ).fetchone()
+    print(f"  inventory_levels: {inv_row[0]} = {inv_row[1]} units on hand.")
 
-    print(f"  {len(shops)} shops, {installed} currently installed")
-    print(f"  {raw} raw events, {txns} transactions, {usage} usage events")
-    print(f"  {ga4} GA4 rows, {reviewed} marked as having reviewed, "
-          f"{len(ANNOTATIONS)} annotations")
-    print(f"  active MRR ${mrr}")
-    print("\nRun it:  uv run uvicorn app_dashboard.web:app --reload")
     conn.close()
+    print("\nSeed complete. Run check_invariants.py to verify.")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

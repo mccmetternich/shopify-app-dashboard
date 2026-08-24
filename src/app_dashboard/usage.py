@@ -28,7 +28,13 @@ logger = logging.getLogger(__name__)
 
 # The join key to everything else. Anchored, so a caller cannot smuggle a
 # free-form bucket key past it.
-SHOP_GID_RE = re.compile(r"^gid://shopify/Shop/\d{1,32}$")
+#
+# Accepts both Shop and Customer GIDs:
+#   gid://shopify/Shop/12345678       — standard usage events (original)
+#   gid://shopify/Customer/12345678   — survey_response events (B7)
+# The resource type is constrained to this allowlist; arbitrary GID types are
+# still rejected (prevents free-form bucket-key abuse).
+SHOP_GID_RE = re.compile(r"^gid://shopify/(?:Shop|Customer)/\d{1,32}$")
 
 # The only event names that exist, from USAGE_EVENT_TYPES. A name outside the
 # set is a bug in the app or an attacker probing, and either way storing it
@@ -187,8 +193,8 @@ def parse_batch(raw: bytes, now: datetime | None = None) -> list[dict]:
         if not SHOP_GID_RE.match(shop_gid):
             raise UsageError(
                 422,
-                f"events[{index}].shop_gid must be a Shopify shop GID, "
-                "e.g. gid://shopify/Shop/12345678",
+                f"events[{index}].shop_gid must be a Shopify Shop or Customer GID, "
+                "e.g. gid://shopify/Shop/12345678 or gid://shopify/Customer/12345678",
             )
         event_id = _text(event.get("event_id"), f"events[{index}].event_id")
         key = (shop_gid, event_id)
@@ -366,6 +372,25 @@ def time_to_activation(conn: psycopg.Connection) -> dict:
         "rate": round(100 * activated / eligible) if eligible else 0,
         "median_hours": round(median_hours, 1) if median_hours is not None else None,
     }
+
+
+def poll_survey_vendor(conn: psycopg.Connection, config) -> None:
+    """Poll an external survey vendor and ingest responses as usage_events.
+
+    Vendor TBD: data flows through usage_events with event_type='survey_response'
+    and entity_id = gid://shopify/Customer/<id>. The 'heard_via' key in
+    properties holds the attribution channel.
+
+    When a vendor is selected (Phase D or later):
+      1. Add vendor client class (similar to RechargeClient / MetaInsightsClient)
+      2. Fetch new responses since last poll (use sync_state with source='survey_vendor')
+      3. Call ingest(conn, events) with event_type='survey_response'
+      4. The usage_events table and survey_tally() in stats.py pick them up automatically.
+
+    This stub exists so the scheduler can wire a survey job in Phase B without
+    breaking when the vendor integration is not yet configured.
+    """
+    pass  # vendor TBD
 
 
 def at_risk_shops(conn: psycopg.Connection, days: int = 14) -> list[dict]:

@@ -1,53 +1,33 @@
+"""Background scheduler — Phase B ingest jobs.
+
+Ingest jobs are NO-OPS (log a warning, don't crash) if the corresponding token
+is empty, so the dashboard can run in demo mode without credentials.
+
+Job cadence (all configurable via settings.*_poll_interval_minutes):
+  - shopify_sync:   every 15 min — orders + customers from Shopify Admin API
+  - meta_sync:      every 15 min — ad spend from Meta Marketing API
+  - recharge_sync:  every 15 min — subscription charges from Recharge
+  - stale_check:    every 60 min — Slack alert if ingest is stale
+  - weekly_digest:  cron        — Slack weekly summary
+"""
+
 import logging
 from datetime import datetime
 
-import httpx
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from app_dashboard.digest import send_weekly_digest
 from app_dashboard.ops import check_stale_sync
-from app_dashboard.partner_api import PartnerClient
-from app_dashboard.pipeline import run_sync, sync_transactions
 
 logger = logging.getLogger(__name__)
 
 WEEKLY_DIGEST_JOB_ID = "weekly_digest"
 
 
-def run_sync_job(conn_factory, client, settings) -> None:
-    """One scheduler tick: open a connection, run the sync, always close it.
-
-    conn_factory in production is app_dashboard.db.connect (a fresh connection per
-    call); leaving it open would leak a Postgres connection every poll.
-    """
-    conn = conn_factory()
-    try:
-        summary = run_sync(conn, client, settings, http_post=httpx.post)
-        logger.info("run_sync completed: %s", summary)
-    finally:
-        conn.close()
-
-
-def run_transactions_job(conn_factory, client, settings) -> None:
-    """Poll the money feed. Its own job, and its own try/except: a failure here
-    must not take the lifecycle sync down, because the events feed is what the
-    install/uninstall alerts run on."""
-    conn = conn_factory()
-    try:
-        summary = sync_transactions(conn, client, settings)
-        logger.info("sync_transactions completed: %s", summary)
-    except Exception:
-        logger.exception("transactions sync failed")
-    finally:
-        conn.close()
-
-
 def run_stale_check_job(conn_factory, settings) -> None:
-    """Shout in Slack if the Partner API sync has stopped. Runs on its own job:
-    if run_sync is the thing that is broken, a check inside it never fires."""
     conn = conn_factory()
     try:
-        check_stale_sync(conn, settings, http_post=httpx.post)
+        check_stale_sync(conn, settings)
     except Exception:
         logger.exception("stale-sync check failed")
     finally:
@@ -57,7 +37,7 @@ def run_stale_check_job(conn_factory, settings) -> None:
 def run_digest_job(conn_factory, settings) -> None:
     conn = conn_factory()
     try:
-        if send_weekly_digest(conn, settings, http_post=httpx.post):
+        if send_weekly_digest(conn, settings):
             logger.info("posted weekly digest")
     except Exception:
         logger.exception("weekly digest failed")
@@ -65,69 +45,88 @@ def run_digest_job(conn_factory, settings) -> None:
         conn.close()
 
 
-def run_ga4_job(conn_factory, settings) -> None:
-    """Refresh listing traffic. Skipped entirely when no key is configured, so
-    the dashboard still runs without GA4 rather than erroring every hour."""
-    if not settings.ga4_credentials_json:
-        logger.info("GA4 credentials not set -- skipping traffic sync")
+def run_shopify_sync_job(conn_factory, settings) -> None:
+    """Sync Shopify orders. NO-OP if shopify_admin_token is unset."""
+    if not settings.shopify_admin_token:
+        logger.warning(
+            "shopify_sync: SHOPIFY_ADMIN_TOKEN is not set — skipping. "
+            "Set SHOPIFY_ADMIN_TOKEN + SHOPIFY_SHOP_DOMAIN to enable live ingest."
+        )
         return
-    from app_dashboard.ga4 import build_client, sync_ga4
-
+    from app_dashboard.shopify_admin import ShopifyAdminClient
+    from app_dashboard.ingest_shopify import sync_orders
     conn = conn_factory()
     try:
-        client = build_client(settings.ga4_credentials_json)
-        written = sync_ga4(conn, client, settings.ga4_property_id)
-        logger.info("ga4 sync completed: %s rows", written)
+        with ShopifyAdminClient(
+            shop_domain=settings.shopify_shop_domain,
+            access_token=settings.shopify_admin_token,
+        ) as client:
+            n = sync_orders(conn, client)
+            logger.info("shopify_sync: %d orders upserted", n)
     except Exception:
-        # A GA4 outage or a revoked key must not take the Partner API sync
-        # down with it; the traffic page just goes stale.
-        logger.exception("ga4 sync failed")
+        logger.exception("shopify_sync failed")
+    finally:
+        conn.close()
+
+
+def run_meta_sync_job(conn_factory, settings) -> None:
+    """Sync Meta ad spend. NO-OP if meta_access_token is unset."""
+    if not settings.meta_access_token:
+        logger.warning(
+            "meta_sync: META_ACCESS_TOKEN is not set — skipping. "
+            "Set META_ACCESS_TOKEN + META_ACCOUNT_ID to enable live ingest."
+        )
+        return
+    from app_dashboard.meta_insights import MetaInsightsClient
+    from app_dashboard.ingest_meta import sync_ad_spend
+    conn = conn_factory()
+    try:
+        with MetaInsightsClient(
+            account_id=settings.meta_account_id,
+            access_token=settings.meta_access_token,
+        ) as client:
+            n = sync_ad_spend(conn, client,
+                              lookback_days=settings.meta_poll_interval_minutes)
+            logger.info("meta_sync: %d ad_spend rows upserted", n)
+    except Exception:
+        logger.exception("meta_sync failed")
+    finally:
+        conn.close()
+
+
+def run_recharge_sync_job(conn_factory, settings) -> None:
+    """Sync Recharge subscription charges. NO-OP if recharge_api_token is unset."""
+    if not settings.recharge_api_token:
+        logger.warning(
+            "recharge_sync: RECHARGE_API_TOKEN is not set — skipping. "
+            "Set RECHARGE_API_TOKEN to enable live subscription ingest."
+        )
+        return
+    from app_dashboard.recharge import RechargeClient
+    from app_dashboard.ingest_recharge import sync_subscription_revenue
+    conn = conn_factory()
+    try:
+        with RechargeClient(api_token=settings.recharge_api_token) as client:
+            n = sync_subscription_revenue(conn, client)
+            logger.info("recharge_sync: %d subscription rows upserted", n)
+    except Exception:
+        logger.exception("recharge_sync failed")
     finally:
         conn.close()
 
 
 def start_scheduler(conn_factory, settings) -> BackgroundScheduler:
-    """Poll the Partner API on an interval via run_sync. Caller owns shutdown()."""
-    client = PartnerClient(settings.partner_api_token, settings.partner_org_id)
-
+    """Start all background jobs. Ingest jobs are NO-OPS when tokens are unset."""
     scheduler = BackgroundScheduler()
-    scheduler.add_job(
-        lambda: run_sync_job(conn_factory, client, settings),
-        "interval",
-        minutes=settings.poll_interval_minutes,
-        # First run at boot, not boot+interval: a fresh deploy should sync
-        # immediately (the very first ever run replays full app history).
-        next_run_time=datetime.now(),
-    )
-    # Money settles on Shopify's schedule, not ours: a charge is created, then
-    # collected some hours later. Hourly is well inside that, and it keeps the
-    # tight pagination loop away from the 15-minute lifecycle poll.
-    scheduler.add_job(
-        lambda: run_transactions_job(conn_factory, client, settings),
-        "interval",
-        hours=1,
-        next_run_time=datetime.now(),
-    )
-    # GA4 aggregates move slowly and the API has a daily token quota, so hourly
-    # is plenty; the first run still happens at boot.
-    scheduler.add_job(
-        lambda: run_ga4_job(conn_factory, settings),
-        "interval",
-        hours=1,
-        next_run_time=datetime.now(),
-    )
-    # Every 15 minutes, but it only posts once per stale episode. Deliberately
-    # a separate job from run_sync: a check that lives inside the thing it is
-    # watching never runs when that thing is the failure.
+
+    # --- Operational jobs (always run) -------------------------------------
     scheduler.add_job(
         lambda: run_stale_check_job(conn_factory, settings),
         "interval",
-        minutes=15,
+        minutes=60,
+        next_run_time=datetime.now(),
     )
-    # DIGEST_DAY_OF_WEEK at DIGEST_HOUR in DIGEST_TIMEZONE. A cron trigger, not
-    # an interval, so it lands at the same local time year round;
-    # send_weekly_digest itself refuses to post twice in one week, which is what
-    # makes a machine restart on digest morning harmless.
+
     scheduler.add_job(
         lambda: run_digest_job(conn_factory, settings),
         "cron",
@@ -137,5 +136,28 @@ def start_scheduler(conn_factory, settings) -> BackgroundScheduler:
         timezone=settings.digest_timezone,
         id=WEEKLY_DIGEST_JOB_ID,
     )
+
+    # --- Ingest jobs (NO-OP when token is empty) ---------------------------
+    scheduler.add_job(
+        lambda: run_shopify_sync_job(conn_factory, settings),
+        "interval",
+        minutes=settings.shopify_poll_interval_minutes,
+        id="shopify_sync",
+    )
+
+    scheduler.add_job(
+        lambda: run_meta_sync_job(conn_factory, settings),
+        "interval",
+        minutes=settings.meta_poll_interval_minutes,
+        id="meta_sync",
+    )
+
+    scheduler.add_job(
+        lambda: run_recharge_sync_job(conn_factory, settings),
+        "interval",
+        minutes=settings.recharge_poll_interval_minutes,
+        id="recharge_sync",
+    )
+
     scheduler.start()
     return scheduler

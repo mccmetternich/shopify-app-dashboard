@@ -12,19 +12,12 @@ import pytest
 # session secret read straight into the suite, because pydantic-settings lets
 # the environment win over .env. DATABASE_URL is the one exception: point it
 # wherever your test database actually is.
-os.environ.setdefault("DATABASE_URL", "postgresql://localhost:5432/app_dashboard_test")
+os.environ.setdefault("DATABASE_URL", "postgresql://localhost:5432/densologie_test")
 os.environ.update({
-    "PARTNER_API_TOKEN": "test-token",
-    "PARTNER_ORG_ID": "1",
-    "PARTNER_APP_ID": "1",
     "DASHBOARD_USERS": "tester:suite-only-credential",
     "PUBLIC_BASE_URL": "http://localhost:8000",
     "GOOGLE_ALLOWED_DOMAINS": "example.com,example.org",
     "SESSION_SECRET": "test-session-secret-not-the-default",
-    # The suite's fixture pricing: $19/month and $190/year. Tests that exercise
-    # the inference itself override this, which is the point -- an annual price
-    # the operator forgets to list is counted as monthly, at 12x its real MRR.
-    "ANNUAL_PLAN_AMOUNTS": "190.00",
     # Never start APScheduler under test: two schedulers means duplicate polls.
     "NO_SCHEDULER": "1",
 })
