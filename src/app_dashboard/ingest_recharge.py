@@ -219,6 +219,136 @@ def _mark_churned(conn: psycopg.Connection) -> int:
     return len(rows)
 
 
+# ── Offer tagging ─────────────────────────────────────────────────────────────
+#
+# Tagging rules (applied to customers.acquisition_offer on first subscription):
+#
+#   reactivation        — customer had a prior 'churn' event before this conversion.
+#                         Reactivations are the highest priority tag: the offer type
+#                         that got them back matters less than the fact they came back.
+#   steep-intro-discount — first Shopify order discount > 30% of order total.
+#                         Captures "BOGO50", "$75 off", etc. at acquisition.
+#   coupon-only          — first order discount > 0 but ≤ 30% of order total.
+#   full-price           — no discount on the first order, or discount_amount is NULL.
+#
+# Derivability: all inputs (churn events, orders.discount_amount) are in the DB,
+# so the tag can be computed retroactively for every existing customer via
+# apply_offer_tags_retroactively(). Day-one live subscribers are tagged at ingest
+# from the same tables — no information is permanently lost.
+#
+# The tag is written once (ON CONFLICT DO NOTHING on the column itself handled by
+# the WHERE acquisition_offer IS NULL guard). It intentionally never changes: the
+# acquisition context is what it was at the moment of conversion.
+
+_STEEP_DISCOUNT_PCT = 30.0  # > this % of order total → steep-intro-discount
+
+
+def _derive_offer_tag(
+    conn: psycopg.Connection,
+    customer_id: str,
+) -> str:
+    """Derive the acquisition_offer tag for a customer from existing DB state.
+
+    Priority order:
+      1. reactivation (had a prior churn event)
+      2. steep-intro-discount (first-order discount > 30%)
+      3. coupon-only (first-order discount > 0)
+      4. full-price (default)
+    """
+    # 1. Was this customer ever churned before their current conversion?
+    had_churn = conn.execute(
+        """
+        select 1
+        from subscription_events se
+        join subscription_revenue sr on sr.id = se.subscription_id
+        where sr.customer_id = %s
+          and se.event_type = 'churn'
+        limit 1
+        """,
+        (customer_id,),
+    ).fetchone()
+    if had_churn:
+        return "reactivation"
+
+    # 2/3. Look at discount_amount on the customer's first order.
+    row = conn.execute(
+        """
+        select discount_amount, total
+        from orders
+        where customer_id = %s
+        order by created_at asc
+        limit 1
+        """,
+        (customer_id,),
+    ).fetchone()
+
+    if row is None or row[1] is None or float(row[1]) == 0:
+        return "full-price"
+
+    discount_amount = float(row[0] or 0)
+    order_total = float(row[1])
+
+    if discount_amount <= 0:
+        return "full-price"
+
+    discount_pct = (discount_amount / order_total) * 100
+    if discount_pct > _STEEP_DISCOUNT_PCT:
+        return "steep-intro-discount"
+    return "coupon-only"
+
+
+def _tag_customer_offer(conn: psycopg.Connection, customer_id: str) -> bool:
+    """Compute and write acquisition_offer for a customer if not already set.
+
+    Idempotent: the WHERE acquisition_offer IS NULL guard means re-running
+    after a cursor expiry does not overwrite an existing tag.
+
+    Returns True if a tag was written, False if the customer was already tagged.
+    """
+    tag = _derive_offer_tag(conn, customer_id)
+    result = conn.execute(
+        """
+        update customers
+        set acquisition_offer = %s
+        where id = %s
+          and acquisition_offer is null
+        """,
+        (tag, customer_id),
+    )
+    return result.rowcount > 0
+
+
+def apply_offer_tags_retroactively(conn: psycopg.Connection) -> int:
+    """Backfill acquisition_offer for all customers who have a subscription but
+    no tag yet.
+
+    Safe to re-run: the WHERE acquisition_offer IS NULL guard makes it idempotent.
+    Runs at end of sync_subscription_revenue so new live subscribers are tagged in
+    the same job that ingests their first charge. Can also be called independently
+    to backfill historical data.
+
+    Returns count of customers tagged.
+    """
+    # Fetch all subscriber customer_ids without an offer tag.
+    rows = conn.execute(
+        """
+        select distinct sr.customer_id
+        from subscription_revenue sr
+        join customers c on c.id = sr.customer_id
+        where c.acquisition_offer is null
+        """,
+    ).fetchall()
+
+    tagged = 0
+    for (customer_id,) in rows:
+        if _tag_customer_offer(conn, customer_id):
+            tagged += 1
+
+    if tagged:
+        logger.info("apply_offer_tags_retroactively: tagged %d customers", tagged)
+    return tagged
+
+
 def _load_sync_state(conn: psycopg.Connection) -> dict:
     row = conn.execute(
         "select meta from sync_state where source = %s",
@@ -331,6 +461,10 @@ def sync_subscription_revenue(
     churned = _mark_churned(conn)
     if churned:
         logger.info("sync_subscription_revenue: marked %d subscriptions as churned", churned)
+
+    # Tag acquisition offer for all subscribers that don't yet have one.
+    # Runs after _mark_churned so reactivation detection sees complete churn history.
+    apply_offer_tags_retroactively(conn)
 
     logger.info(
         "sync_subscription_revenue: complete, %d total rows upserted", total_upserted
