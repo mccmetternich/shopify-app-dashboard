@@ -5,6 +5,20 @@ Repo: `mccmetternich/shopify-app-dashboard` (working name until rename).
 
 ---
 
+## Current Position (2026-08-24)
+
+**At GATE 1.** `docs/METRICS_DEFINITIONS.md` written. Awaiting architect answers to 13 flagged questions before proceeding to seed + tests (GATE 2). All flags listed in METRICS_DEFINITIONS.md open-questions table.
+
+**Critical blockers (cannot seed or build UI without answers):**
+- [FLAG-C1] COGS per SKU (blocks LTV, payback, offer-segmented GP curves)
+- [FLAG-A1] Monthly subscription prices ($129 serum confirmed?)
+- [FLAG-G1] Upsell SKUs / order property keys from Shopify store
+- [FLAG-H1] Landing-page URL patterns for PDP/listicle/lander classification
+
+**Next action:** Matthias relays flags to architect → answers come back → resume at GATE 2 (seed extensions + tests).
+
+---
+
 ## Phase Table
 
 | Phase | Name                        | Status      | Description |
