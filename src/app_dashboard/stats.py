@@ -2526,21 +2526,31 @@ def data_quality_stats(conn: psycopg.Connection) -> dict:
     ).fetchone()[0] or 0
 
     # Try to get sync state — table may not exist yet
-    last_sync_per_source = {}
+    # Column is `source` (not `source_key`); also pull last_error for quality page.
+    last_sync_per_source: dict[str, dict] = {}
     try:
-        rows = conn.execute("select source_key, last_synced_at from sync_state").fetchall()
-        for source_key, last_synced_at in rows:
-            last_sync_per_source[source_key] = last_synced_at
+        rows = conn.execute(
+            "select source, last_synced_at, last_error, last_error_at from sync_state"
+        ).fetchall()
+        for src, last_synced_at, last_error, last_error_at in rows:
+            last_sync_per_source[src] = {
+                "synced_at":    last_synced_at,
+                "last_error":   last_error,
+                "last_error_at": last_error_at,
+            }
     except Exception:
-        pass  # sync_state table not present yet
+        pass  # sync_state table not present yet (pre-migration env)
 
-    # Derive age strings
-    from datetime import datetime as _dt
+    # Derive age strings for the three live ingest sources.
+    # ga4_funnel is shown as "not wired" until Phase D credentials are supplied.
     now = _utcnow()
-    SOURCES = ["shopify_orders", "meta_ad_spend", "recharge", "ga4_funnel"]
+    SOURCES = ["shopify_orders", "meta_ad_spend", "recharge_charges", "ga4_funnel"]
     source_rows = []
     for src in SOURCES:
-        synced_at = last_sync_per_source.get(src)
+        entry     = last_sync_per_source.get(src, {})
+        synced_at = entry.get("synced_at")
+        last_error  = entry.get("last_error")
+        error_at    = entry.get("last_error_at")
         if synced_at is None:
             age_minutes = None
             age_str = "Never"
@@ -2561,10 +2571,12 @@ def data_quality_stats(conn: psycopg.Connection) -> dict:
             else:
                 status = "ok"
         source_rows.append({
-            "source": src,
-            "synced_at": synced_at,
-            "age_str": age_str,
-            "status": status,
+            "source":       src,
+            "synced_at":    synced_at,
+            "age_str":      age_str,
+            "status":       status,
+            "last_error":   last_error,
+            "last_error_at": error_at,
         })
 
     return {

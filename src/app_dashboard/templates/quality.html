@@ -75,6 +75,7 @@
                     <th>Last synced</th>
                     <th>Age</th>
                     <th>Status</th>
+                    <th>Last error</th>
                 </tr>
             </thead>
             <tbody>
@@ -106,6 +107,18 @@
                         <span class="pill installed">Fresh</span>
                         {% endif %}
                     </td>
+                    <td style="font-family:var(--mono);font-size:11px;color:var(--sub);max-width:280px;word-break:break-word;">
+                        {% if row.last_error %}
+                        <span style="color:var(--down);" title="{{ row.last_error }}">
+                            {{ row.last_error[:80] }}{% if row.last_error|length > 80 %}…{% endif %}
+                        </span>
+                        {% if row.last_error_at %}
+                        <br><span class="sub">{{ row.last_error_at.strftime("%m-%d %H:%M") }}</span>
+                        {% endif %}
+                        {% else %}
+                        <span class="sub">—</span>
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -113,7 +126,7 @@
     </div>
     <p class="sub" style="margin-top:8px;">
         Green = synced within 4h. Amber = 4–24h. Red = over 24h. Never = source not yet wired.
-        The sync_state table is updated by each ingest job at the end of a successful run.
+        Last error is written by the scheduler on job failure; cleared on next successful sync.
     </p>
 </div>
 {% endblock %}
