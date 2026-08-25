@@ -1295,6 +1295,1141 @@ def meta_top_ads(conn: psycopg.Connection, window_days: int, limit: int = 5) -> 
     return out
 
 
+# ── Gate 2 metrics ───────────────────────────────────────────────────────────
+
+from typing import Optional
+
+
+def gross_profit_per_order(conn: psycopg.Connection, order_id: int) -> Optional[Decimal]:
+    """Returns gross profit for a single order using cost_inputs + cost_settings.
+    Returns None if any line item SKU is missing from cost_inputs."""
+    row = conn.execute(
+        "select total, refunded, discount_amount, line_items from orders where id = %s",
+        (order_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    total, refunded, discount_amount, line_items = row
+    discount_amount = discount_amount or Decimal("0")
+    line_items = line_items or []
+
+    # Load cost settings
+    settings = {
+        r[0]: Decimal(str(r[1]))
+        for r in conn.execute("select key, value from cost_settings").fetchall()
+    }
+    if not settings:
+        return None
+
+    shipping = settings.get("shipping_cost_per_order", Decimal("0"))
+    payment_fee_pct = settings.get("payment_fee_pct", Decimal("0"))
+
+    # Sum COGS for all line items
+    total_cogs = Decimal("0")
+    for item in line_items:
+        sku = item.get("sku") if isinstance(item, dict) else None
+        quantity = Decimal(str(item.get("quantity", 1))) if isinstance(item, dict) else Decimal("1")
+        if not sku:
+            return None
+        cogs_row = conn.execute(
+            "select cogs_per_unit from cost_inputs where sku = %s", (sku,)
+        ).fetchone()
+        if cogs_row is None:
+            return None
+        total_cogs += quantity * cogs_row[0]
+
+    net_revenue = total - refunded - discount_amount
+    payment_fee = total * payment_fee_pct
+    gp = net_revenue - total_cogs - shipping - payment_fee
+    return gp
+
+
+def mrr_recognized(conn: psycopg.Connection, year: int, month: int) -> Optional[Decimal]:
+    """Sum of monthly_amount for all active (non-paused) subs during the given month.
+    Paused subs are excluded per the lifecycle spec — their MRR is deferred, not recognized."""
+    # A sub is active in a month if: converted_at < end of month AND (churned_at is null OR churned_at >= start of month)
+    # AND status != 'paused' (paused subs do not have MRR recognized)
+    row = conn.execute(
+        """
+        select coalesce(sum(monthly_amount), null)
+        from subscription_revenue
+        where converted_at < make_date(%s, %s, 1)::timestamptz + interval '1 month'
+          and (churned_at is null or churned_at >= make_date(%s, %s, 1)::timestamptz)
+          and status != 'paused'
+        """,
+        (year, month, year, month),
+    ).fetchone()
+    return row[0] if row and row[0] is not None else None
+
+
+def cash_collected_in_month(conn: psycopg.Connection, year: int, month: int) -> Optional[Decimal]:
+    """Sum of cash_collected where cash_collected > 0 for subs active in given month."""
+    # Cash is collected at the start of the billing period (converted_at for the first month,
+    # or renewal date for subsequent periods). For prepaid: cash_collected > 0 only in month 0.
+    # We look for subs whose converted_at falls within this month (month 0 = initial charge),
+    # plus monthly subs active in this month (each month has a charge).
+    row = conn.execute(
+        """
+        select coalesce(sum(cash_collected), null)
+        from subscription_revenue
+        where cash_collected > 0
+          and (
+            -- initial cash collected: converted_at in this month
+            (date_trunc('month', converted_at) = make_date(%s, %s, 1)::timestamptz)
+            OR
+            -- monthly subs: active and it's a renewal month
+            (sub_type = 'monthly'
+             and converted_at < make_date(%s, %s, 1)::timestamptz + interval '1 month'
+             and (churned_at is null or churned_at >= make_date(%s, %s, 1)::timestamptz)
+             and date_trunc('month', converted_at) != make_date(%s, %s, 1)::timestamptz)
+          )
+        """,
+        (year, month, year, month, year, month, year, month),
+    ).fetchone()
+    return row[0] if row and row[0] is not None else Decimal("0")
+
+
+def logo_churn_voluntary(conn: psycopg.Connection, year: int, month: int) -> Optional[Decimal]:
+    """Voluntary churn rate for given month. Returns None if no subs at month start."""
+    month_start = f"{year}-{month:02d}-01"
+    at_start = conn.execute(
+        """
+        select count(*)
+        from subscription_revenue
+        where converted_at < %s::timestamptz
+          and (churned_at is null or churned_at >= %s::timestamptz)
+        """,
+        (month_start, month_start),
+    ).fetchone()[0]
+    if not at_start:
+        return None
+
+    churned = conn.execute(
+        """
+        select count(*)
+        from subscription_revenue
+        where churn_type = 'voluntary'
+          and date_trunc('month', churned_at) = %s::timestamptz
+        """,
+        (month_start,),
+    ).fetchone()[0]
+
+    return Decimal(str(churned)) / Decimal(str(at_start))
+
+
+def logo_churn_involuntary(conn: psycopg.Connection, year: int, month: int) -> Optional[Decimal]:
+    """Involuntary churn rate (confirmed, >=14 days dunning). Returns None if no subs at month start."""
+    month_start = f"{year}-{month:02d}-01"
+    at_start = conn.execute(
+        """
+        select count(*)
+        from subscription_revenue
+        where converted_at < %s::timestamptz
+          and (churned_at is null or churned_at >= %s::timestamptz)
+        """,
+        (month_start, month_start),
+    ).fetchone()[0]
+    if not at_start:
+        return None
+
+    churned = conn.execute(
+        """
+        select count(*)
+        from subscription_revenue
+        where churn_type = 'involuntary'
+          and date_trunc('month', churned_at) = %s::timestamptz
+          and churned_at is not null
+          and dunning_started_at is not null
+          and (churned_at - dunning_started_at) >= interval '14 days'
+        """,
+        (month_start,),
+    ).fetchone()[0]
+
+    return Decimal(str(churned)) / Decimal(str(at_start))
+
+
+def subs_in_dunning(conn: psycopg.Connection) -> dict:
+    """Returns {'count': int, 'at_risk_mrr': Decimal} for subs in active dunning window (<14 days)."""
+    # In dunning = dunning_started_at is within last 14 days AND no churned_at
+    # AND no dunning_resolved event after the dunning_start
+    row = conn.execute(
+        """
+        select count(*), coalesce(sum(sr.monthly_amount), 0)
+        from subscription_revenue sr
+        where sr.churned_at is null
+          and sr.dunning_started_at is not null
+          and sr.dunning_started_at > now() - interval '14 days'
+          and not exists (
+            select 1 from subscription_events se
+            where se.subscription_id = sr.id
+              and se.event_type = 'dunning_resolved'
+              and se.event_date >= sr.dunning_started_at::date
+          )
+        """
+    ).fetchone()
+    return {
+        "count": row[0] if row else 0,
+        "at_risk_mrr": row[1] if row else Decimal("0"),
+    }
+
+
+def rev_churn_voluntary(conn: psycopg.Connection, year: int, month: int) -> Optional[Decimal]:
+    """Revenue churn rate (voluntary) for given month."""
+    month_start = f"{year}-{month:02d}-01"
+    mrr_at_start = conn.execute(
+        """
+        select coalesce(sum(monthly_amount), null)
+        from subscription_revenue
+        where converted_at < %s::timestamptz
+          and (churned_at is null or churned_at >= %s::timestamptz)
+        """,
+        (month_start, month_start),
+    ).fetchone()[0]
+    if not mrr_at_start:
+        return None
+
+    churned_mrr = conn.execute(
+        """
+        select coalesce(sum(monthly_amount), null)
+        from subscription_revenue
+        where churn_type = 'voluntary'
+          and date_trunc('month', churned_at) = %s::timestamptz
+        """,
+        (month_start,),
+    ).fetchone()[0]
+    if churned_mrr is None:
+        return Decimal("0")
+    return churned_mrr / mrr_at_start
+
+
+def rev_churn_involuntary(conn: psycopg.Connection, year: int, month: int) -> Optional[Decimal]:
+    """Revenue churn rate (involuntary, confirmed >=14 days) for given month."""
+    month_start = f"{year}-{month:02d}-01"
+    mrr_at_start = conn.execute(
+        """
+        select coalesce(sum(monthly_amount), null)
+        from subscription_revenue
+        where converted_at < %s::timestamptz
+          and (churned_at is null or churned_at >= %s::timestamptz)
+        """,
+        (month_start, month_start),
+    ).fetchone()[0]
+    if not mrr_at_start:
+        return None
+
+    churned_mrr = conn.execute(
+        """
+        select coalesce(sum(monthly_amount), null)
+        from subscription_revenue
+        where churn_type = 'involuntary'
+          and date_trunc('month', churned_at) = %s::timestamptz
+          and churned_at is not null
+          and dunning_started_at is not null
+          and (churned_at - dunning_started_at) >= interval '14 days'
+        """,
+        (month_start,),
+    ).fetchone()[0]
+    if churned_mrr is None:
+        return Decimal("0")
+    return churned_mrr / mrr_at_start
+
+
+def skip_rate(conn: psycopg.Connection, year: int, month: int) -> Optional[Decimal]:
+    """Skip rate = skips in month / active subs at month start."""
+    month_start = f"{year}-{month:02d}-01"
+    at_start = conn.execute(
+        """
+        select count(*)
+        from subscription_revenue
+        where converted_at < %s::timestamptz
+          and (churned_at is null or churned_at >= %s::timestamptz)
+        """,
+        (month_start, month_start),
+    ).fetchone()[0]
+    if not at_start:
+        return None
+
+    skips = conn.execute(
+        """
+        select count(*)
+        from subscription_events
+        where event_type = 'skip'
+          and date_trunc('month', event_date::timestamptz) = %s::timestamptz
+        """,
+        (month_start,),
+    ).fetchone()[0]
+
+    return Decimal(str(skips)) / Decimal(str(at_start))
+
+
+def subscription_waterfall(conn: psycopg.Connection, year: int, month: int) -> dict:
+    """Returns beginning_mrr, new_mrr, expansion_mrr, contraction_mrr,
+       churned_mrr_voluntary, churned_mrr_involuntary, ending_mrr.
+       All values from subscription_events."""
+    month_start = f"{year}-{month:02d}-01"
+
+    def _sum_events(event_types, extra_where="", params=()):
+        type_placeholders = ",".join(["%s"] * len(event_types))
+        sql = f"""
+            select coalesce(sum(mrr_delta), 0)
+            from subscription_events
+            where event_type in ({type_placeholders})
+              and date_trunc('month', event_date::timestamptz) = %s::timestamptz
+              {extra_where}
+        """
+        return conn.execute(sql, list(event_types) + [month_start] + list(params)).fetchone()[0]
+
+    # Beginning MRR = sum of 'new' events BEFORE this month
+    beginning_mrr = conn.execute(
+        """
+        select coalesce(sum(mrr_delta), 0)
+        from subscription_events
+        where event_type = 'new'
+          and event_date < %s::date
+        """,
+        (month_start,),
+    ).fetchone()[0]
+    # Subtract churns before this month
+    churned_before = conn.execute(
+        """
+        select coalesce(abs(sum(mrr_delta)), 0)
+        from subscription_events
+        where event_type = 'churn'
+          and event_date < %s::date
+        """,
+        (month_start,),
+    ).fetchone()[0]
+    beginning_mrr = (beginning_mrr or Decimal("0")) - (churned_before or Decimal("0"))
+
+    new_mrr = _sum_events(("new",)) or Decimal("0")
+    expansion_mrr = _sum_events(("expansion",)) or Decimal("0")
+
+    # Contraction: stored as negative mrr_delta; return absolute value
+    contraction_raw = conn.execute(
+        """
+        select coalesce(sum(mrr_delta), 0)
+        from subscription_events
+        where event_type = 'contraction'
+          and date_trunc('month', event_date::timestamptz) = %s::timestamptz
+        """,
+        (month_start,),
+    ).fetchone()[0] or Decimal("0")
+    contraction_mrr = abs(contraction_raw)
+
+    # Voluntary churn: stored as negative mrr_delta
+    vol_churn_raw = conn.execute(
+        """
+        select coalesce(sum(se.mrr_delta), 0)
+        from subscription_events se
+        join subscription_revenue sr on sr.id = se.subscription_id
+        where se.event_type = 'churn'
+          and date_trunc('month', se.event_date::timestamptz) = %s::timestamptz
+          and sr.churn_type = 'voluntary'
+        """,
+        (month_start,),
+    ).fetchone()[0] or Decimal("0")
+    churned_mrr_voluntary = abs(vol_churn_raw)
+
+    # Involuntary churn (confirmed >=14 days)
+    invol_churn_raw = conn.execute(
+        """
+        select coalesce(sum(se.mrr_delta), 0)
+        from subscription_events se
+        join subscription_revenue sr on sr.id = se.subscription_id
+        where se.event_type = 'churn'
+          and date_trunc('month', se.event_date::timestamptz) = %s::timestamptz
+          and sr.churn_type = 'involuntary'
+          and sr.dunning_started_at is not null
+          and (sr.churned_at - sr.dunning_started_at) >= interval '14 days'
+        """,
+        (month_start,),
+    ).fetchone()[0] or Decimal("0")
+    churned_mrr_involuntary = abs(invol_churn_raw)
+
+    ending_mrr = (beginning_mrr + new_mrr + expansion_mrr
+                  - contraction_mrr - churned_mrr_voluntary - churned_mrr_involuntary)
+
+    return {
+        "beginning_mrr": beginning_mrr,
+        "new_mrr": new_mrr,
+        "expansion_mrr": expansion_mrr,
+        "contraction_mrr": contraction_mrr,
+        "churned_mrr_voluntary": churned_mrr_voluntary,
+        "churned_mrr_involuntary": churned_mrr_involuntary,
+        "ending_mrr": ending_mrr,
+    }
+
+
+def three_revenue_streams(conn: psycopg.Connection, window_days: int = 30) -> dict:
+    """Returns new_customer_revenue, subscription_recurring_revenue,
+       non_sub_repeat_revenue, total. Null-not-zero.
+
+    The three streams are mutually exclusive:
+      - new_customer: is_new_customer = true (regardless of sub flag)
+      - subscription_recurring: is_subscription_order = true AND is_new_customer = false
+      - non_sub_repeat: is_new_customer = false AND is_subscription_order = false
+    """
+    cutoff = _utcnow() - timedelta(days=window_days)
+
+    new_rev = conn.execute(
+        """
+        select coalesce(sum(total - refunded), null)
+        from orders
+        where is_new_customer = true and created_at >= %s
+        """,
+        (cutoff,),
+    ).fetchone()[0]
+
+    sub_rev = conn.execute(
+        """
+        select coalesce(sum(total - refunded), null)
+        from orders
+        where is_subscription_order = true
+          and is_new_customer = false
+          and created_at >= %s
+        """,
+        (cutoff,),
+    ).fetchone()[0]
+
+    non_sub_rev = conn.execute(
+        """
+        select coalesce(sum(total - refunded), null)
+        from orders
+        where is_new_customer = false
+          and is_subscription_order = false
+          and created_at >= %s
+        """,
+        (cutoff,),
+    ).fetchone()[0]
+
+    # Total: sum of all three (convert None to 0 for summation, then return None if all None)
+    all_none = (new_rev is None and sub_rev is None and non_sub_rev is None)
+    if all_none:
+        total = None
+    else:
+        total = (new_rev or Decimal("0")) + (sub_rev or Decimal("0")) + (non_sub_rev or Decimal("0"))
+
+    return {
+        "new_customer_revenue": new_rev,
+        "subscription_recurring_revenue": sub_rev,
+        "non_sub_repeat_revenue": non_sub_rev,
+        "total": total,
+    }
+
+
+def cohort_ltv_12m(conn: psycopg.Connection) -> list[dict]:
+    """Returns list of {cohort_label, ltv, cohort_size, is_estimated} for
+       cohorts with >=12 months of history."""
+    now = _utcnow()
+    cutoff_cohort = now - timedelta(days=365)
+
+    rows = conn.execute(
+        """
+        select
+            to_char(date_trunc('month', c.first_order_at), 'YYYY-MM') as cohort_label,
+            count(distinct c.id) as cohort_size,
+            date_trunc('month', c.first_order_at) as cohort_start
+        from customers c
+        where c.first_order_at < %s
+        group by cohort_label, cohort_start
+        order by cohort_start
+        """,
+        (cutoff_cohort,),
+    ).fetchall()
+
+    result = []
+    for cohort_label, cohort_size, cohort_start in rows:
+        cohort_end = cohort_start + timedelta(days=365)
+        # Get all orders from cohort members in first 12 months
+        order_rows = conn.execute(
+            """
+            select o.id, o.total, o.refunded, o.discount_amount, o.line_items
+            from orders o
+            join customers c on c.id = o.customer_id
+            where date_trunc('month', c.first_order_at) = %s
+              and o.created_at >= %s
+              and o.created_at < %s
+            """,
+            (cohort_start, cohort_start, cohort_end),
+        ).fetchall()
+
+        total_gp = Decimal("0")
+        is_estimated = False
+
+        settings = {
+            r[0]: Decimal(str(r[1]))
+            for r in conn.execute("select key, value from cost_settings").fetchall()
+        }
+        shipping = settings.get("shipping_cost_per_order", Decimal("0"))
+        payment_fee_pct = settings.get("payment_fee_pct", Decimal("0"))
+
+        for order_id, total, refunded, discount_amount, line_items in order_rows:
+            discount_amount = discount_amount or Decimal("0")
+            line_items = line_items or []
+            cogs = Decimal("0")
+            cogs_ok = True
+            for item in line_items:
+                sku = item.get("sku") if isinstance(item, dict) else None
+                qty = Decimal(str(item.get("quantity", 1))) if isinstance(item, dict) else Decimal("1")
+                if sku:
+                    cogs_row = conn.execute(
+                        "select cogs_per_unit from cost_inputs where sku = %s", (sku,)
+                    ).fetchone()
+                    if cogs_row is None:
+                        cogs_ok = False
+                        break
+                    cogs += qty * cogs_row[0]
+                else:
+                    cogs_ok = False
+                    break
+            if not cogs_ok:
+                is_estimated = True
+                continue
+            gp = (total - refunded - discount_amount) - cogs - shipping - (total * payment_fee_pct)
+            total_gp += gp
+
+        if cohort_size > 0:
+            ltv = total_gp / Decimal(cohort_size)
+        else:
+            ltv = Decimal("0")
+
+        result.append({
+            "cohort_label": cohort_label,
+            "ltv": ltv,
+            "cohort_size": cohort_size,
+            "is_estimated": is_estimated,
+        })
+
+    return result
+
+
+def theoretical_ltv(conn: psycopg.Connection) -> Optional[Decimal]:
+    """avg_monthly_GP_per_active_sub / monthly_logo_churn_total. None if no data."""
+    # Active sub GP from sub orders in last 90 days / active subs / 3
+    active_subs = conn.execute(
+        "select count(*) from subscription_revenue where churned_at is null"
+    ).fetchone()[0]
+    if not active_subs:
+        return None
+
+    cutoff = _utcnow() - timedelta(days=90)
+    settings = {
+        r[0]: Decimal(str(r[1]))
+        for r in conn.execute("select key, value from cost_settings").fetchall()
+    }
+    if not settings:
+        return None
+
+    shipping = settings.get("shipping_cost_per_order", Decimal("0"))
+    payment_fee_pct = settings.get("payment_fee_pct", Decimal("0"))
+
+    sub_orders = conn.execute(
+        """
+        select o.total, o.refunded, o.discount_amount, o.line_items
+        from orders o
+        where o.is_subscription_order = true
+          and o.created_at >= %s
+        """,
+        (cutoff,),
+    ).fetchall()
+
+    if not sub_orders:
+        return None
+
+    total_gp = Decimal("0")
+    for total, refunded, discount_amount, line_items in sub_orders:
+        discount_amount = discount_amount or Decimal("0")
+        line_items = line_items or []
+        cogs = Decimal("0")
+        for item in line_items:
+            sku = item.get("sku") if isinstance(item, dict) else None
+            qty = Decimal(str(item.get("quantity", 1))) if isinstance(item, dict) else Decimal("1")
+            if sku:
+                cogs_row = conn.execute(
+                    "select cogs_per_unit from cost_inputs where sku = %s", (sku,)
+                ).fetchone()
+                if cogs_row:
+                    cogs += qty * cogs_row[0]
+        gp = (total - refunded - discount_amount) - cogs - shipping - (total * payment_fee_pct)
+        total_gp += gp
+
+    avg_monthly_gp = total_gp / Decimal(active_subs) / Decimal("3")
+
+    # Last full month's total logo churn
+    now = _utcnow()
+    last_month = now.replace(day=1) - timedelta(days=1)
+    vol_churn = logo_churn_voluntary(conn, last_month.year, last_month.month)
+    invol_churn = logo_churn_involuntary(conn, last_month.year, last_month.month)
+
+    if vol_churn is None and invol_churn is None:
+        return None
+
+    total_churn = (vol_churn or Decimal("0")) + (invol_churn or Decimal("0"))
+    if total_churn == 0:
+        return None
+
+    return avg_monthly_gp / total_churn
+
+
+def payback_timing(conn: psycopg.Connection) -> list[dict]:
+    """Returns list of {cohort_label, cac, gp_by_month: list[Decimal], payback_month: Optional[int]}"""
+    now = _utcnow()
+    settings = {
+        r[0]: Decimal(str(r[1]))
+        for r in conn.execute("select key, value from cost_settings").fetchall()
+    }
+    shipping = settings.get("shipping_cost_per_order", Decimal("0"))
+    payment_fee_pct = settings.get("payment_fee_pct", Decimal("0"))
+
+    cohort_rows = conn.execute(
+        """
+        select to_char(date_trunc('month', first_order_at), 'YYYY-MM') as label,
+               date_trunc('month', first_order_at) as month_start,
+               count(*) as cohort_size
+        from customers
+        group by label, month_start
+        order by month_start
+        """
+    ).fetchall()
+
+    result = []
+    for cohort_label, month_start, cohort_size in cohort_rows:
+        # CAC for this cohort month
+        spend = conn.execute(
+            "select coalesce(sum(spend), null) from ad_spend where date_trunc('month', date::timestamptz) = %s",
+            (month_start,),
+        ).fetchone()[0]
+        new_custs = conn.execute(
+            """
+            select count(distinct customer_id) from orders
+            where is_new_customer = true
+              and date_trunc('month', created_at) = %s
+            """,
+            (month_start,),
+        ).fetchone()[0]
+
+        if not spend or not new_custs:
+            cac = None
+        else:
+            cac = spend / Decimal(new_custs)
+
+        # GP per customer by month offset
+        max_offset = min(23, (now.year * 12 + now.month - 1) - (month_start.year * 12 + month_start.month - 1))
+        gp_by_month = []
+        cum_gp = Decimal("0")
+        payback_month = None
+
+        for offset in range(max_offset + 1):
+            target_start = month_start + timedelta(days=30 * offset)
+            target_end = month_start + timedelta(days=30 * (offset + 1))
+
+            order_rows = conn.execute(
+                """
+                select o.total, o.refunded, o.discount_amount, o.line_items
+                from orders o
+                join customers c on c.id = o.customer_id
+                where date_trunc('month', c.first_order_at) = %s
+                  and o.created_at >= %s and o.created_at < %s
+                """,
+                (month_start, target_start, target_end),
+            ).fetchall()
+
+            month_gp = Decimal("0")
+            for total, refunded, discount_amount, line_items in order_rows:
+                discount_amount = discount_amount or Decimal("0")
+                line_items = line_items or []
+                cogs = Decimal("0")
+                for item in line_items:
+                    sku = item.get("sku") if isinstance(item, dict) else None
+                    qty = Decimal(str(item.get("quantity", 1))) if isinstance(item, dict) else Decimal("1")
+                    if sku:
+                        cogs_row = conn.execute(
+                            "select cogs_per_unit from cost_inputs where sku = %s", (sku,)
+                        ).fetchone()
+                        if cogs_row:
+                            cogs += qty * cogs_row[0]
+                gp = (total - refunded - discount_amount) - cogs - shipping - (total * payment_fee_pct)
+                month_gp += gp
+
+            if cohort_size > 0:
+                cum_gp += month_gp / Decimal(cohort_size)
+            gp_by_month.append(cum_gp)
+
+            if payback_month is None and cac is not None and cum_gp >= cac:
+                payback_month = offset
+
+        result.append({
+            "cohort_label": cohort_label,
+            "cac": cac,
+            "gp_by_month": gp_by_month,
+            "payback_month": payback_month,
+        })
+
+    return result
+
+
+def upsell_stats(conn: psycopg.Connection, window_days: int = 30) -> dict:
+    """Returns dict with take_rates for each upsell_type. Null-not-zero."""
+    cutoff = _utcnow() - timedelta(days=window_days)
+
+    order_count = conn.execute(
+        "select count(*) from orders where created_at >= %s",
+        (cutoff,),
+    ).fetchone()[0]
+
+    upsell_types = ["priority_shipping", "upsell_t1", "upsell_t2", "upsell_t3", "aftersell"]
+    result = {}
+
+    for utype in upsell_types:
+        accepted = conn.execute(
+            """
+            select count(*)
+            from upsell_events ue
+            join orders o on o.id = ue.order_id
+            where ue.upsell_type = %s
+              and ue.accepted = true
+              and o.created_at >= %s
+            """,
+            (utype, cutoff),
+        ).fetchone()[0]
+
+        total_events = conn.execute(
+            """
+            select count(*)
+            from upsell_events ue
+            join orders o on o.id = ue.order_id
+            where ue.upsell_type = %s
+              and o.created_at >= %s
+            """,
+            (utype, cutoff),
+        ).fetchone()[0]
+
+        if total_events == 0 or order_count == 0:
+            result[utype] = {"take_rate": None, "accepted": 0, "total": 0}
+        else:
+            take_rate = Decimal("100") * Decimal(str(accepted)) / Decimal(str(order_count))
+            result[utype] = {
+                "take_rate": take_rate,
+                "accepted": accepted,
+                "total": total_events,
+            }
+
+    return result
+
+
+def active_subscribers(conn: psycopg.Connection, as_of=None) -> int:
+    """Count of active (non-paused, non-churned) subscribers as of a given datetime.
+    If as_of is None, uses now(). Excludes status='paused' and status='churned'."""
+    if as_of is None:
+        as_of = _utcnow()
+    row = conn.execute(
+        """
+        select count(*)
+        from subscription_revenue
+        where converted_at <= %s
+          and status = 'active'
+          and (churned_at is null or churned_at > %s)
+        """,
+        (as_of, as_of),
+    ).fetchone()
+    return row[0] if row else 0
+
+
+def paused_subscribers(conn: psycopg.Connection) -> dict:
+    """Returns {'count': int, 'deferred_mrr': Decimal}.
+    Deferred MRR = sum of monthly_amount for status='paused' subs.
+    Returns {'count': 0, 'deferred_mrr': None} if no paused subs."""
+    row = conn.execute(
+        """
+        select count(*), sum(monthly_amount)
+        from subscription_revenue
+        where status = 'paused'
+        """
+    ).fetchone()
+    count = row[0] if row else 0
+    deferred_mrr = row[1] if row and row[1] is not None else None
+    return {"count": count, "deferred_mrr": deferred_mrr}
+
+
+def pause_rate(conn: psycopg.Connection, year: int, month: int) -> Optional[Decimal]:
+    """Pauses starting in the given month / active subs at month start.
+    Returns None if no active subs at month start."""
+    month_start = f"{year}-{month:02d}-01"
+    at_start = conn.execute(
+        """
+        select count(*)
+        from subscription_revenue
+        where converted_at < %s::timestamptz
+          and status = 'active'
+          and (churned_at is null or churned_at >= %s::timestamptz)
+        """,
+        (month_start, month_start),
+    ).fetchone()[0]
+    if not at_start:
+        return None
+
+    pauses = conn.execute(
+        """
+        select count(*)
+        from subscription_events
+        where event_type = 'pause'
+          and date_trunc('month', event_date::timestamptz) = %s::timestamptz
+        """,
+        (month_start,),
+    ).fetchone()[0]
+
+    return Decimal(str(pauses)) / Decimal(str(at_start))
+
+
+def pause_outcome_split(conn: psycopg.Connection) -> Optional[dict]:
+    """Of all subs that have ever been paused (paused_at IS NOT NULL):
+    Returns {'reactivated_pct': Decimal, 'cancelled_pct': Decimal, 'still_paused_pct': Decimal, 'total_paused': int}.
+    Returns None if no subs have ever been paused."""
+    row = conn.execute(
+        """
+        select
+            count(*) as total,
+            count(*) filter (where paused_outcome = 'reactivated') as reactivated,
+            count(*) filter (where paused_outcome = 'cancelled') as cancelled,
+            count(*) filter (where paused_outcome is null) as still_paused
+        from subscription_revenue
+        where paused_at is not null
+        """
+    ).fetchone()
+    if not row or not row[0]:
+        return None
+    total, reactivated, cancelled, still_paused = row
+    return {
+        "reactivated_pct": Decimal("100") * Decimal(str(reactivated)) / Decimal(str(total)),
+        "cancelled_pct": Decimal("100") * Decimal(str(cancelled)) / Decimal(str(total)),
+        "still_paused_pct": Decimal("100") * Decimal(str(still_paused)) / Decimal(str(total)),
+        "total_paused": total,
+    }
+
+
+def reactivation_stats(conn: psycopg.Connection, window_days: int = 90) -> Optional[dict]:
+    """Returns {'count': int, 'recovered_mrr': Decimal, 'avg_gap_days': Decimal}.
+    count = winback subscription_events in window.
+    recovered_mrr = sum of mrr_delta for those events.
+    avg_gap_days = average days between parent sub's churned_at and winback event_date.
+    Returns None if no winbacks in window."""
+    cutoff = _utcnow() - timedelta(days=window_days)
+    rows = conn.execute(
+        """
+        select se.mrr_delta,
+               se.event_date,
+               sr.churned_at
+        from subscription_events se
+        join subscription_revenue sr on sr.id = se.subscription_id
+        where se.event_type = 'winback'
+          and se.event_date >= %s::date
+        """,
+        (cutoff.date(),),
+    ).fetchall()
+    if not rows:
+        return None
+
+    count = len(rows)
+    recovered_mrr = sum(r[0] for r in rows if r[0] is not None) or Decimal("0")
+    gap_days_list = []
+    for mrr_delta, event_date, churned_at in rows:
+        if churned_at is not None:
+            # event_date is a date, churned_at is a timestamptz
+            if hasattr(event_date, 'date'):
+                ed = event_date
+            else:
+                from datetime import date as _date
+                ed = event_date
+            from datetime import datetime as _dt
+            if isinstance(ed, _dt):
+                ed = ed.date()
+            gap = (ed - churned_at.date()).days
+            if gap >= 0:
+                gap_days_list.append(gap)
+
+    avg_gap_days = (
+        Decimal(str(sum(gap_days_list))) / Decimal(str(len(gap_days_list)))
+        if gap_days_list else Decimal("0")
+    )
+
+    return {
+        "count": count,
+        "recovered_mrr": recovered_mrr,
+        "avg_gap_days": avg_gap_days,
+    }
+
+
+def reactivation_rate_by_cohort(conn: psycopg.Connection) -> list[dict]:
+    """For each cohort (first_order month), returns:
+    {'cohort_label': str, 'cohort_size': int, 'winback_count': int, 'winback_rate_pct': Decimal}
+    Only for cohorts with at least one win-back."""
+    rows = conn.execute(
+        """
+        select
+            to_char(date_trunc('month', c.first_order_at), 'YYYY-MM') as cohort_label,
+            count(distinct c.id) as cohort_size,
+            sum(c.winback_count) as winbacks
+        from customers c
+        group by cohort_label
+        having sum(c.winback_count) > 0
+        order by cohort_label
+        """
+    ).fetchall()
+    result = []
+    for cohort_label, cohort_size, winbacks in rows:
+        winback_count = int(winbacks or 0)
+        rate = Decimal("100") * Decimal(str(winback_count)) / Decimal(str(cohort_size)) if cohort_size else Decimal("0")
+        result.append({
+            "cohort_label": cohort_label,
+            "cohort_size": cohort_size,
+            "winback_count": winback_count,
+            "winback_rate_pct": rate,
+        })
+    return result
+
+
+def blended_cac_excl_reactivations(conn: psycopg.Connection, window_days: int = 30) -> Optional[Decimal]:
+    """CAC = ad_spend / new_customers where new_customers EXCLUDES winback events.
+    Uses is_new_customer=true AND winback_count=0 (not a returning subscriber).
+    Returns None if no new customers in window."""
+    cutoff = _utcnow() - timedelta(days=window_days)
+    total_spend = conn.execute(
+        """
+        select coalesce(sum(spend), null)
+        from ad_spend
+        where date >= %s::date
+        """,
+        (cutoff.date(),),
+    ).fetchone()[0]
+    if not total_spend:
+        return None
+
+    new_customers = conn.execute(
+        """
+        select count(distinct o.customer_id)
+        from orders o
+        join customers c on c.id = o.customer_id
+        where o.is_new_customer = true
+          and c.winback_count = 0
+          and o.created_at >= %s
+        """,
+        (cutoff,),
+    ).fetchone()[0]
+
+    if not new_customers:
+        return None
+
+    return total_spend / Decimal(str(new_customers))
+
+
+def subscription_waterfall_v2(conn: psycopg.Connection, year: int, month: int) -> dict:
+    """Extends subscription_waterfall to include a 'reactivation_mrr' bucket.
+    Returns: beginning_mrr, new_mrr, reactivation_mrr, expansion_mrr,
+             contraction_mrr, churned_mrr_voluntary, churned_mrr_involuntary, ending_mrr.
+    Reactivation MRR = sum of mrr_delta for 'winback' events in the month."""
+    base = subscription_waterfall(conn, year, month)
+    month_start = f"{year}-{month:02d}-01"
+    reactivation_mrr = conn.execute(
+        """
+        select coalesce(sum(mrr_delta), 0)
+        from subscription_events
+        where event_type = 'winback'
+          and date_trunc('month', event_date::timestamptz) = %s::timestamptz
+        """,
+        (month_start,),
+    ).fetchone()[0] or Decimal("0")
+
+    return {
+        "beginning_mrr": base["beginning_mrr"],
+        "new_mrr": base["new_mrr"],
+        "reactivation_mrr": reactivation_mrr,
+        "expansion_mrr": base["expansion_mrr"],
+        "contraction_mrr": base["contraction_mrr"],
+        "churned_mrr_voluntary": base["churned_mrr_voluntary"],
+        "churned_mrr_involuntary": base["churned_mrr_involuntary"],
+        "ending_mrr": base["ending_mrr"],
+    }
+
+
+def get_subscriber_state_counts(conn: psycopg.Connection) -> dict:
+    """Returns {'active': int, 'paused': int, 'churned': int, 'total': int}.
+    Used for reconciliation test."""
+    row = conn.execute(
+        """
+        select
+            count(*) filter (where status = 'active') as active,
+            count(*) filter (where status = 'paused') as paused,
+            count(*) filter (where status = 'churned') as churned,
+            count(*) as total
+        from subscription_revenue
+        """
+    ).fetchone()
+    if not row:
+        return {"active": 0, "paused": 0, "churned": 0, "total": 0}
+    return {
+        "active": row[0] or 0,
+        "paused": row[1] or 0,
+        "churned": row[2] or 0,
+        "total": row[3] or 0,
+    }
+
+
+def landing_page_funnel(conn: psycopg.Connection, window_days: int = 30) -> list[dict]:
+    """Returns list of {page_type, sessions, atc_rate, checkout_rate, purchase_rate}
+       ordered by sessions desc. Excludes direct_checkout from funnel math."""
+    cutoff = _utcnow() - timedelta(days=window_days)
+
+    rows = conn.execute(
+        """
+        select
+            landing_page_type,
+            sum(sessions) as sessions,
+            sum(add_to_carts) as atcs,
+            sum(begin_checkouts) as bcs,
+            sum(purchases) as purchases
+        from ga4_funnel
+        where date >= %s::date
+          and landing_page_type != 'direct_checkout'
+        group by landing_page_type
+        order by sessions desc
+        """,
+        (cutoff.date(),),
+    ).fetchall()
+
+    result = []
+    for page_type, sessions, atcs, bcs, purchases in rows:
+        atc_rate = round(100 * atcs / sessions, 1) if sessions else None
+        checkout_rate = round(100 * bcs / sessions, 1) if sessions else None
+        purchase_rate = round(100 * purchases / sessions, 1) if sessions else None
+        result.append({
+            "page_type": page_type,
+            "sessions": sessions,
+            "atc_rate": atc_rate,
+            "checkout_rate": checkout_rate,
+            "purchase_rate": purchase_rate,
+        })
+
+    return result
+
+
+def offer_segmented_cohorts(conn: psycopg.Connection) -> dict:
+    """Returns dict keyed by offer_tag, each value a cohort grid identical to
+       the existing cohort_revenue_per_customer structure."""
+    now = _utcnow()
+    this_month = _month_index(now)
+
+    offer_tags = ["full-price", "coupon-only", "steep-intro-discount", "reactivation"]
+    result = {}
+
+    for offer in offer_tags:
+        rows = conn.execute(
+            """
+            select c.id,
+                   date_trunc('month', c.first_order_at) as cohort_month,
+                   date_trunc('month', o.created_at) as order_month,
+                   (o.total - o.refunded) as net
+            from orders o
+            join customers c on c.id = o.customer_id
+            where c.acquisition_offer = %s
+            order by cohort_month, c.id, order_month
+            """,
+            (offer,),
+        ).fetchall()
+
+        if not rows:
+            result[offer] = {"months": [], "max_age": 0, "rows": [], "target_ltgp": 390.0}
+            continue
+
+        from collections import defaultdict
+        cohort_customers: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(Decimal)))
+        for cust_id, cohort_month_dt, order_month_dt, net in rows:
+            cohort_mi = _month_index(cohort_month_dt)
+            order_mi = _month_index(order_month_dt)
+            cohort_customers[cohort_mi][cust_id][order_mi] += (net or Decimal("0"))
+
+        all_cohort_months = sorted(cohort_customers.keys())
+        max_age = max(this_month - cm for cm in all_cohort_months)
+        max_age = min(max_age, 23)
+
+        result_rows = []
+        month_labels = []
+
+        for cohort_mi in all_cohort_months:
+            ym = f"{cohort_mi // 12}-{1 + (cohort_mi % 12):02d}"
+            month_labels.append(ym)
+            customers = cohort_customers[cohort_mi]
+            cohort_size = len(customers)
+            observable_months = this_month - cohort_mi
+
+            values = []
+            for offset in range(min(observable_months + 1, max_age + 1)):
+                target_mi = cohort_mi + offset
+                total_cumulative = Decimal("0")
+                for cust_revenues in customers.values():
+                    for order_mi, net in cust_revenues.items():
+                        if order_mi <= target_mi:
+                            total_cumulative += net
+                values.append(total_cumulative / Decimal(cohort_size) if cohort_size else None)
+
+            result_rows.append({
+                "cohort": ym,
+                "size": cohort_size,
+                "cells": values,
+            })
+
+        result[offer] = {
+            "months": month_labels,
+            "max_age": max_age,
+            "rows": result_rows,
+            "target_ltgp": 390.0,
+        }
+
+    return result
+
+
+def subscription_retention_by_offset(conn: psycopg.Connection) -> dict:
+    """Returns {cohort_label: {M1: pct, M3: pct, M6: pct, M12: pct}} for all cohorts.
+       None for offsets not yet observable."""
+    now = _utcnow()
+    this_month = _month_index(now)
+
+    rows = conn.execute(
+        "select id, converted_at, churned_at from subscription_revenue where converted_at is not null"
+    ).fetchall()
+
+    if not rows:
+        return {}
+
+    from collections import defaultdict
+    cohorts: dict[int, list] = defaultdict(list)
+    for sub_id, converted_at, churned_at in rows:
+        cm = _month_index(converted_at)
+        churn_offset = None
+        if churned_at is not None:
+            churn_offset = _month_index(churned_at) - cm
+        cohorts[cm].append(churn_offset)
+
+    result = {}
+    offsets = [1, 3, 6, 12]
+    for cm in sorted(cohorts.keys()):
+        ym = f"{cm // 12}-{1 + (cm % 12):02d}"
+        subs = cohorts[cm]
+        cohort_size = len(subs)
+        observable_months = this_month - cm
+
+        row = {}
+        for offset in offsets:
+            if observable_months < offset:
+                row[f"M{offset}"] = None
+            else:
+                active = sum(1 for c in subs if c is None or c > offset)
+                row[f"M{offset}"] = round(100 * active / cohort_size) if cohort_size else None
+        result[ym] = row
+
+    return result
+
+
 def omnisend_summary(conn: psycopg.Connection, window_days: int, total_revenue) -> dict:
     """Omnisend email/SMS summary for the window.
 

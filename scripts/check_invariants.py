@@ -122,6 +122,59 @@ def main() -> int:
     check("is_new_customer = true appears on at most one order per customer",
           not bad, detail=f"customer ids with multiple new-flags: {[r[0] for r in bad[:5]]}")
 
+    # ── Invariant 7 (Gate 2) ─────────────────────────────────────────────────
+    # No subscription_events row with event_type='churn' where the parent sub has no churned_at
+    bad = rows(conn, """
+        select se.id from subscription_events se
+        join subscription_revenue sr on sr.id = se.subscription_id
+        where se.event_type = 'churn'
+          and sr.churned_at is null
+    """)
+    check("No 'churn' event for a subscription without churned_at",
+          not bad,
+          detail=f"violating subscription_event ids: {[r[0] for r in bad[:5]]}",
+          scope=scalar(conn, "select count(*) from subscription_events where event_type='churn'"))
+
+    # ── Invariant 8 (Gate 2) ─────────────────────────────────────────────────
+    # Three revenue streams sum to total net revenue (within $0.01).
+    # Streams are mutually exclusive: new_customer takes priority over is_subscription_order.
+    new_rev = scalar(conn,
+        "select coalesce(sum(total - refunded), 0) from orders where is_new_customer = true")
+    sub_rev = scalar(conn,
+        "select coalesce(sum(total - refunded), 0) from orders "
+        "where is_subscription_order = true and is_new_customer = false")
+    non_sub_rev = scalar(conn,
+        "select coalesce(sum(total - refunded), 0) from orders "
+        "where is_new_customer = false and is_subscription_order = false")
+    total_net = scalar(conn,
+        "select coalesce(sum(total - refunded), 0) from orders")
+    from decimal import Decimal
+    computed = (new_rev or Decimal("0")) + (sub_rev or Decimal("0")) + (non_sub_rev or Decimal("0"))
+    diff = abs((computed or Decimal("0")) - (total_net or Decimal("0")))
+    check("Three revenue streams sum to total net revenue (within $0.01)",
+          diff <= Decimal("0.01"),
+          detail=f"new={new_rev} + sub={sub_rev} + non_sub={non_sub_rev} = {computed} vs total={total_net} (diff={diff})",
+          scope=scalar(conn, "select count(*) from orders"))
+
+    # ── Invariant 9 (Gate 2) ─────────────────────────────────────────────────
+    # All cost_inputs COGS values >= 0
+    bad = rows(conn, "select sku, cogs_per_unit from cost_inputs where cogs_per_unit < 0")
+    check("All cost_inputs.cogs_per_unit >= 0",
+          not bad,
+          detail=f"negative COGS SKUs: {bad[:5]}",
+          scope=scalar(conn, "select count(*) from cost_inputs"))
+
+    # ── Invariant 10 (Gate 2) ────────────────────────────────────────────────
+    # Every upsell_event.order_id exists in orders
+    bad = rows(conn, """
+        select ue.id from upsell_events ue
+        where not exists (select 1 from orders o where o.id = ue.order_id)
+    """)
+    check("Every upsell_event.order_id exists in orders",
+          not bad,
+          detail=f"orphaned upsell_event ids: {[r[0] for r in bad[:5]]}",
+          scope=scalar(conn, "select count(*) from upsell_events"))
+
     # ── Sanity: table population ──────────────────────────────────────────────
     for table in ("orders", "customers", "ad_spend", "subscription_revenue"):
         n = scalar(conn, f"select count(*) from {table}")
