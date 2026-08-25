@@ -45,7 +45,23 @@
 {# ── B: MRR waterfall ── #}
 <div class="card" id="mrr-waterfall">
     <h2>MRR waterfall — this month</h2>
-    <p class="sub">Beginning MRR + movements = ending MRR. Reactivation = win-back events. Involuntary churn confirmed after ≥14-day dunning window.</p>
+    <p class="sub">Beginning MRR + movements = ending MRR. Verified against live subscriber total — rendered only when event data reconciles.</p>
+    {% if waterfall is none %}
+    <div class="empty-state"><p class="sub">No subscription event data yet.</p></div>
+    {% elif not waterfall.reconciled %}
+    <div class="empty-state">
+        <p class="sub">
+            Event data out of sync — event-derived ending MRR
+            {% if waterfall.reconcile_delta < 0 %}
+            overstates measured MRR by ${{ "%.0f"|format(waterfall.reconcile_delta|abs) }}
+            (missing churn or contraction events).
+            {% else %}
+            understates measured MRR by ${{ "%.0f"|format(waterfall.reconcile_delta|abs) }}
+            (missing expansion events).
+            {% endif %}
+        </p>
+    </div>
+    {% else %}
     <div class="legend">
         <span><i style="background: var(--mv-new)"></i>New</span>
         <span><i style="background: var(--mv-reactivation)"></i>Reactivation</span>
@@ -53,7 +69,6 @@
         <span><i style="background: var(--mv-contraction)"></i>Contraction</span>
         <span><i style="background: var(--mv-churned)"></i>Churned</span>
     </div>
-    {% if waterfall %}
     <table class="data-table" style="margin-top:10px;">
         <tbody>
             <tr>
@@ -90,8 +105,11 @@
             </tr>
         </tbody>
     </table>
-    {% else %}
-    <div class="empty-state"><p class="sub">No subscription data yet.</p></div>
+    {% if waterfall.ending_mrr_actual is not none %}
+    <p class="sub" style="margin-top:6px;text-align:right;">
+        Verified: ${{ "%.0f"|format(waterfall.ending_mrr_actual) }} measured from live subscribers
+    </p>
+    {% endif %}
     {% endif %}
 </div>
 

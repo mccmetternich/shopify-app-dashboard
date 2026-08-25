@@ -155,27 +155,61 @@ def _emit_mrr_recognized(conn: psycopg.Connection, charge: dict) -> None:
 def _mark_churned(conn: psycopg.Connection) -> int:
     """Retroactively churn subscriptions with no charge in the last 45 days.
 
-    Reads subscription_revenue rows that are still active (churned_at IS NULL)
-    and checks the last charge date for each subscription_id. If the most recent
-    charge is older than _CHURN_DAYS, the subscription is marked churned.
+    Identifies active subs (churned_at IS NULL) whose converted_at is older than
+    the cutoff and that have no existing 'churn' event. For each:
+      - Sets churned_at, status='churned', churn_type='involuntary'
+      - Emits one 'churn' event to subscription_events with approximation_reason
+        explaining this is a billing-gap inference, not a confirmed cancellation
 
-    This is a best-effort churn signal. Recharge may have a cancellation event,
-    but we don't subscribe to webhooks in Phase B — we infer from billing gaps.
-    Phase D (live wiring) can replace this with a proper webhook.
+    approximation_reason = 'billing-gap: no charge in 45+ days'
+    Phase D (webhooks) will replace this with an exact cancellation timestamp.
 
-    Returns count of rows marked churned.
+    Returns count of newly churned subscriptions.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=_CHURN_DAYS)
-    result = conn.execute(
+    event_date = cutoff.date()
+    reason = f"billing-gap: no charge in {_CHURN_DAYS}+ days"
+
+    rows = conn.execute(
+        """
+        select sr.id, sr.customer_id, sr.monthly_amount
+        from subscription_revenue sr
+        where sr.churned_at is null
+          and sr.converted_at < %s
+          and not exists (
+              select 1 from subscription_events se
+              where se.subscription_id = sr.id and se.event_type = 'churn'
+          )
+        """,
+        (cutoff,),
+    ).fetchall()
+
+    if not rows:
+        return 0
+
+    sub_ids = [r[0] for r in rows]
+
+    conn.execute(
         """
         update subscription_revenue
-        set churned_at = %s
-        where churned_at is null
-          and converted_at < %s
+        set churned_at = %s, status = 'churned', churn_type = 'involuntary'
+        where id = any(%s) and churned_at is null
         """,
-        (cutoff, cutoff),
+        (cutoff, sub_ids),
     )
-    return result.rowcount
+
+    conn.executemany(
+        """
+        insert into subscription_events
+            (subscription_id, customer_id, event_type, event_date, mrr_delta, approximation_reason)
+        values (%s, %s, 'churn', %s, %s, %s)
+        """,
+        [
+            (sub_id, customer_id, event_date, -monthly_amount, reason)
+            for sub_id, customer_id, monthly_amount in rows
+        ],
+    )
+    return len(rows)
 
 
 def _load_sync_state(conn: psycopg.Connection) -> dict:
@@ -344,6 +378,46 @@ def _backfill_new_events(conn: psycopg.Connection) -> int:
     return result.rowcount
 
 
+def _backfill_churn_events(conn: psycopg.Connection) -> int:
+    """Emit 'churn' events for subscription_revenue rows with churned_at but no event.
+
+    Covers:
+      - Seed data / historical imports that set churned_at without writing events
+      - Subscriptions churned before the event system was wired
+
+    approximation_reason:
+      NULL             — churn_type='voluntary' (churned_at treated as authoritative)
+      'billing-gap...' — churn_type='involuntary' (inferred from billing gap)
+      'backfill: churn_type unknown' — churn_type IS NULL (origin unclear)
+
+    Idempotent: WHERE NOT EXISTS guard prevents duplicates on re-run.
+    """
+    result = conn.execute(
+        """
+        insert into subscription_events
+            (subscription_id, customer_id, event_type, event_date, mrr_delta, approximation_reason)
+        select
+            sr.id,
+            sr.customer_id,
+            'churn',
+            sr.churned_at::date,
+            -sr.monthly_amount,
+            case sr.churn_type
+                when 'voluntary'   then null
+                when 'involuntary' then 'billing-gap: no charge in 45+ days'
+                else                    'backfill: churn_type unknown'
+            end
+        from subscription_revenue sr
+        where sr.churned_at is not null
+          and not exists (
+              select 1 from subscription_events se
+              where se.subscription_id = sr.id and se.event_type = 'churn'
+          )
+        """
+    )
+    return result.rowcount
+
+
 def _backfill_winback_events(conn: psycopg.Connection) -> int:
     """Emit 'winback' events for 'new' events where the customer had a prior 'churn'.
 
@@ -419,11 +493,20 @@ def sync_subscription_events(
         logger.info("sync_subscription_events: no subscriptions in subscription_revenue, skipping")
         return 0
 
-    # Step 1: emit 'new' events for all subscriptions without one.
+    # Step 1a: emit 'new' events for all subscriptions without one.
     # Runs before the API call so the winback pass sees complete 'new' coverage.
     new_emitted = _backfill_new_events(conn)
     if new_emitted:
         logger.info("sync_subscription_events: emitted %d 'new' events", new_emitted)
+
+    # Step 1b: emit 'churn' events for subscription_revenue rows that have churned_at
+    # set but no corresponding event. This covers seed data, historical imports, and
+    # any subscription that was marked churned before this event system existed.
+    # approximation_reason is NULL for voluntary (churned_at treated as authoritative)
+    # and 'billing-gap: ...' for involuntary.
+    backfill_churns = _backfill_churn_events(conn)
+    if backfill_churns:
+        logger.info("sync_subscription_events: backfilled %d 'churn' events from subscription_revenue", backfill_churns)
 
     # Step 2: fetch subscriptions from API and process per-subscription.
     watermark = _load_sub_event_watermark(conn)

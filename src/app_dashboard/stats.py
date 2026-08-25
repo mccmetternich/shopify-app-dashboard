@@ -2231,12 +2231,61 @@ def blended_cac_excl_reactivations(conn: psycopg.Connection, window_days: int = 
     return total_spend / Decimal(str(new_customers))
 
 
+# Maximum allowed difference between event-derived and measured ending MRR before
+# the waterfall is replaced by an out-of-sync message. $5 absorbs decimal rounding
+# but catches any missing event (minimum real subscriber MRR ~$30+).
+_WATERFALL_RECONCILE_TOLERANCE = Decimal("5.00")
+
+
+def _ending_mrr_actual(conn: psycopg.Connection, year: int, month: int) -> Optional[Decimal]:
+    """Independent MRR measurement for the end of the given month.
+
+    Current month: sums monthly_amount for status='active' subscriptions right now.
+    Past months: reads the last subscription_snapshot of that month (mrr_recognized column).
+
+    Returns None if the measurement is unavailable (no snapshot for a past month).
+    The caller treats None as 'measurement unavailable — do not gate the waterfall.'
+    """
+    now = _utcnow()
+    if year == now.year and month == now.month:
+        row = conn.execute(
+            "select coalesce(sum(monthly_amount), null) from subscription_revenue where status = 'active'"
+        ).fetchone()
+        return row[0] if row else None
+    else:
+        row = conn.execute(
+            """
+            select mrr_recognized
+            from subscription_snapshots
+            where snapshot_date >= make_date(%s, %s, 1)
+              and snapshot_date <  (make_date(%s, %s, 1) + interval '1 month')::date
+            order by snapshot_date desc
+            limit 1
+            """,
+            (year, month, year, month),
+        ).fetchone()
+        return row[0] if row and row[0] is not None else None
+
+
 def subscription_waterfall_v2(conn: psycopg.Connection, year: int, month: int) -> Optional[dict]:
-    """Extends subscription_waterfall to include a 'reactivation_mrr' bucket.
-    Returns: beginning_mrr, new_mrr, reactivation_mrr, expansion_mrr,
-             contraction_mrr, churned_mrr_voluntary, churned_mrr_involuntary, ending_mrr.
-    Reactivation MRR = sum of mrr_delta for 'winback' events in the month.
-    Returns None when subscription_events is empty — cannot distinguish zero from no data."""
+    """MRR waterfall with reactivation bucket and independent reconciliation check.
+
+    Returns None when subscription_events is empty.
+
+    Otherwise always returns a dict. Check result['reconciled']:
+      True  — event-derived ending MRR agrees with measured ending MRR within
+              _WATERFALL_RECONCILE_TOLERANCE. Safe to render.
+      False — gap detected; result['reconcile_delta'] = measured − event-derived.
+              Negative = events overstate MRR (missing churn/contraction).
+              Positive = events understate MRR (missing expansion).
+              Render the gap to the operator instead of the buckets.
+
+    reconcile_delta is None when no independent measurement is available (no
+    snapshot for a past month). In that case reconciled=True and the waterfall
+    renders — absence of a check is not evidence of a problem.
+
+    Bug fixed here: the v1 base['ending_mrr'] did not include reactivation_mrr.
+    """
     has_events = conn.execute(
         "select exists(select 1 from subscription_events limit 1)"
     ).fetchone()[0]
@@ -2255,15 +2304,34 @@ def subscription_waterfall_v2(conn: psycopg.Connection, year: int, month: int) -
         (month_start,),
     ).fetchone()[0] or Decimal("0")
 
+    # ending_mrr derived entirely from events (tautology without a check).
+    ending_mrr_events = (
+        base["ending_mrr"] + reactivation_mrr
+        # base["ending_mrr"] = beginning + new + expansion - contraction - voluntary - involuntary
+        # Add reactivation here; it was missing from the v1 formula.
+    )
+
+    # Independent measurement — breaks the tautology.
+    ending_mrr_actual = _ending_mrr_actual(conn, year, month)
+    if ending_mrr_actual is not None:
+        reconcile_delta = ending_mrr_actual - ending_mrr_events
+        reconciled = abs(reconcile_delta) <= _WATERFALL_RECONCILE_TOLERANCE
+    else:
+        reconcile_delta = None
+        reconciled = True  # no measurement available; don't gate on absence of data
+
     return {
-        "beginning_mrr": base["beginning_mrr"],
-        "new_mrr": base["new_mrr"],
-        "reactivation_mrr": reactivation_mrr,
-        "expansion_mrr": base["expansion_mrr"],
-        "contraction_mrr": base["contraction_mrr"],
-        "churned_mrr_voluntary": base["churned_mrr_voluntary"],
+        "beginning_mrr":        base["beginning_mrr"],
+        "new_mrr":              base["new_mrr"],
+        "reactivation_mrr":     reactivation_mrr,
+        "expansion_mrr":        base["expansion_mrr"],
+        "contraction_mrr":      base["contraction_mrr"],
+        "churned_mrr_voluntary":   base["churned_mrr_voluntary"],
         "churned_mrr_involuntary": base["churned_mrr_involuntary"],
-        "ending_mrr": base["ending_mrr"],
+        "ending_mrr":           ending_mrr_events,
+        "ending_mrr_actual":    ending_mrr_actual,
+        "reconciled":           reconciled,
+        "reconcile_delta":      reconcile_delta,
     }
 
 
