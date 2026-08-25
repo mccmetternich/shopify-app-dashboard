@@ -127,25 +127,51 @@ def test_is_new_customer_only_on_first_order(db):
 
 
 # ---------------------------------------------------------------------------
-# Sanity: tables exist and are seeded
+# Schema smoke: core tables accept writes (self-seeding — no seed_demo.py needed)
 # ---------------------------------------------------------------------------
 
-def test_orders_table_has_rows(db):
-    """The seed must have written at least some orders."""
-    count = _one(db, "select count(*) from orders")
-    assert count > 0, "orders table is empty — did seed_demo.py run?"
+def test_orders_table_accepts_rows(db):
+    """Schema is wired: orders can be inserted and read back."""
+    db.execute(
+        "insert into customers (id, email_hash, first_order_at, country) "
+        "values ('c_inv', 'h_inv', now(), 'US')"
+    )
+    db.execute(
+        "insert into orders (id, customer_id, created_at, total, refunded, currency, "
+        "is_new_customer, line_items) "
+        "values ('o_inv', 'c_inv', now(), 149, 0, 'USD', true, '[]')"
+    )
+    db.commit()
+    assert _one(db, "select count(*) from orders where id = 'o_inv'") == 1
 
 
-def test_customers_table_has_rows(db):
-    count = _one(db, "select count(*) from customers")
-    assert count > 0, "customers table is empty"
+def test_customers_table_accepts_rows(db):
+    db.execute(
+        "insert into customers (id, email_hash, first_order_at, country) "
+        "values ('c_inv2', 'h_inv2', now(), 'US')"
+    )
+    db.commit()
+    assert _one(db, "select count(*) from customers where id = 'c_inv2'") == 1
 
 
-def test_ad_spend_table_has_rows(db):
-    count = _one(db, "select count(*) from ad_spend")
-    assert count > 0, "ad_spend table is empty"
+def test_ad_spend_table_accepts_rows(db):
+    db.execute(
+        "insert into ad_spend (date, campaign_id, campaign_name, platform, spend) "
+        "values ('2026-01-01', 'cmp1', 'Test', 'meta', 100.00)"
+    )
+    db.commit()
+    assert _one(db, "select count(*) from ad_spend") == 1
 
 
-def test_subscription_revenue_table_has_rows(db):
-    count = _one(db, "select count(*) from subscription_revenue")
-    assert count > 0, "subscription_revenue table is empty"
+def test_subscription_revenue_table_accepts_rows(db):
+    db.execute(
+        "insert into customers (id, email_hash, first_order_at, country) "
+        "values ('c_sub', 'h_sub', now(), 'US') on conflict do nothing"
+    )
+    db.execute(
+        "insert into subscription_revenue "
+        "(id, customer_id, monthly_amount, converted_at, sub_type, cash_collected, status) "
+        "values ('sr1', 'c_sub', 99.00, now(), 'monthly', 99.00, 'active')"
+    )
+    db.commit()
+    assert _one(db, "select count(*) from subscription_revenue where id = 'sr1'") == 1

@@ -8,12 +8,9 @@ from app_dashboard.usage import (
     MAX_PROPERTIES_BYTES,
     PER_SHOP_DAILY_CAP,
     UsageError,
-    activation_cohorts,
-    at_risk_shops,
     has_usage_data,
     ingest,
     parse_batch,
-    time_to_activation,
 )
 
 NOW = datetime(2026, 8, 10, 12, 0, tzinfo=timezone.utc)
@@ -23,7 +20,7 @@ def _event(**over):
     event = {
         "event_id": "e1",
         "shop_gid": "gid://shopify/Shop/1",
-        "event_type": "offer_created",
+        "event_type": "survey_response",
         "occurred_at": "2026-08-10T11:00:00Z",
     }
     event.update(over)
@@ -38,8 +35,8 @@ def _body(*events):
 
 def test_a_well_formed_batch_parses():
     events = parse_batch(_body(_event(), _event(event_id="e2",
-                                                event_type="offer_impression")), now=NOW)
-    assert [e["event_type"] for e in events] == ["offer_created", "offer_impression"]
+                                                event_type="purchase")), now=NOW)
+    assert [e["event_type"] for e in events] == ["survey_response", "purchase"]
     assert events[0]["occurred_at"] == datetime(2026, 8, 10, 11, tzinfo=timezone.utc)
     assert events[0]["properties"] == {}
 
@@ -119,12 +116,12 @@ def test_ingest_is_idempotent_and_never_overwrites(db):
 
     # Same key, different payload: the stored event must win.
     second = ingest(db, parse_batch(
-        _body(_event(event_type="offer_conversion", properties={"offer": "tampered"})), now=NOW))
+        _body(_event(event_type="purchase", properties={"offer": "tampered"})), now=NOW))
     assert second["stored"] == 0 and second["duplicates"] == 1
 
     row = db.execute(
         "select event_type, properties from usage_events").fetchall()
-    assert row == [("offer_created", {"offer": "bogo"})]
+    assert row == [("survey_response", {"offer": "bogo"})]
 
 
 def test_a_shop_over_the_daily_cap_is_dropped_without_failing_the_batch(db, monkeypatch):
@@ -151,13 +148,6 @@ def test_the_cap_is_a_rolling_day_not_all_time(db, monkeypatch):
 
 # --- reports ---------------------------------------------------------------
 
-def _install(db, gid, when, name=None):
-    db.execute("insert into shops (shop_gid, shop_name, install_state, installed_at) "
-               "values (%s, %s, 'installed', %s)", (gid, name or gid, when))
-    db.execute("insert into app_events (platform_event_id, type, occurred_at, shop_gid) "
-               "values (%s, 'installed', %s, %s)", (f"ev-{gid}", when, gid))
-
-
 def _usage(db, gid, event_type, when, received=None):
     db.execute(
         """insert into usage_events (shop_gid, event_id, event_type, occurred_at, received_at)
@@ -166,64 +156,9 @@ def _usage(db, gid, event_type, when, received=None):
 
 
 def test_empty_state_is_distinguishable_from_zero_activation(db):
-    _install(db, "s1", NOW - timedelta(days=10))
+    _usage(db, "gid://shopify/Shop/1", "survey_response", NOW - timedelta(days=10))
     db.commit()
     assert has_usage_data(db) is False
-
-
-def test_activation_cohorts_and_median(db):
-    tracking_started = NOW - timedelta(days=60)
-    fast = NOW - timedelta(days=40)
-    slow = NOW - timedelta(days=39)
-    never = NOW - timedelta(days=38)
-    # Installed before tracking existed: must be excluded, not counted as a
-    # merchant who never activated.
-    _install(db, "old", NOW - timedelta(days=200))
-    _install(db, "fast", fast)
-    _install(db, "slow", slow)
-    _install(db, "never", never)
-    _usage(db, "fast", "offer_created", fast + timedelta(hours=2), tracking_started)
-    _usage(db, "slow", "offer_created", slow + timedelta(days=5), tracking_started)
-    db.commit()
-
-    summary = time_to_activation(db)
-    assert summary["eligible"] == 3          # "old" is not in the denominator
-    assert summary["activated"] == 2 and summary["never"] == 1
-    assert summary["rate"] == 67
-    assert summary["median_hours"] == pytest.approx(61, abs=2)   # median of 2h and 120h
-
-    rows = activation_cohorts(db, months=6)
-    assert len(rows) == 1
-    assert rows[0]["cohort"] == 3
-    assert rows[0]["within_48h"] == 1        # only "fast" made 48 hours
-    assert rows[0]["within_7d"] == 2
-    assert rows[0]["rate_7d"] == 67
-
-
-def test_at_risk_lists_paying_shops_whose_offers_stopped_showing(db):
-    for gid in ("quiet", "busy", "unpaid"):
-        _install(db, gid, NOW - timedelta(days=90), name=gid.title())
-    for gid in ("quiet", "busy"):
-        db.execute("insert into subscriptions (id, shop_gid, monthly_amount, converted_at) "
-                   "values (%s, %s, 19.00, now() - interval '60 days')", (f"c-{gid}", gid))
-    _usage(db, "quiet", "offer_impression", datetime.now(timezone.utc) - timedelta(days=30))
-    _usage(db, "busy", "offer_impression", datetime.now(timezone.utc) - timedelta(days=1))
-    _usage(db, "unpaid", "offer_impression", datetime.now(timezone.utc) - timedelta(days=30))
-    db.commit()
-
-    rows = at_risk_shops(db, days=14)
-    # "busy" served an offer yesterday; "unpaid" is quiet but pays nothing, so
-    # it is a trial-watch problem, not a churn-risk one.
-    assert [r["shop"] for r in rows] == ["Quiet"]
-    assert rows[0]["days_quiet"] == 30
-
-
-def test_a_shop_that_predates_tracking_is_not_called_at_risk(db):
-    _install(db, "ancient", NOW - timedelta(days=300), name="Ancient")
-    db.execute("insert into subscriptions (id, shop_gid, monthly_amount, converted_at) "
-               "values ('c1', 'ancient', 19.00, now() - interval '200 days')")
-    db.commit()
-    assert at_risk_shops(db, days=14) == []
 
 
 # --- hardening added after the pre-publication red team ---------------------

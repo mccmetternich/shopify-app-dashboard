@@ -24,6 +24,7 @@ def test_weekly_digest_is_registered_at_the_configured_local_time(monkeypatch):
     monkeypatch.setattr(sched, "BackgroundScheduler", lambda: fake)
     sched.start_scheduler(lambda: None, SimpleNamespace(
         digest_day_of_week="tue", digest_hour=7, digest_timezone="Europe/Berlin",
+        store_timezone="America/Los_Angeles",
         # Phase B ingest settings — tokens empty so jobs are NO-OPs
         shopify_admin_token="", shopify_shop_domain="",
         meta_access_token="", meta_account_id="",
@@ -33,7 +34,10 @@ def test_weekly_digest_is_registered_at_the_configured_local_time(monkeypatch):
         recharge_poll_interval_minutes=15,
     ))
 
-    digest = [kw for trigger, kw in fake.jobs if trigger == "cron"]
+    # Scheduler has a weekly digest cron and a daily snapshot cron.
+    # Only check the digest job (day_of_week present).
+    digest = [kw for trigger, kw in fake.jobs
+              if trigger == "cron" and "day_of_week" in kw]
     assert len(digest) == 1
     assert digest[0]["day_of_week"] == "tue"
     assert digest[0]["hour"] == 7 and digest[0]["minute"] == 0

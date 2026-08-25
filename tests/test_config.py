@@ -55,7 +55,7 @@ def test_the_activation_event_must_be_one_the_endpoint_accepts(monkeypatch):
 
 
 def test_slug_falls_back_to_app_name(monkeypatch):
-    monkeypatch.delenv("APP_SLUG", raising=False)
+    monkeypatch.setenv("APP_SLUG", "")  # empty triggers fallback; default is non-empty
     monkeypatch.setenv("APP_NAME", "My Brand")
     get_settings.cache_clear()
     s = get_settings()

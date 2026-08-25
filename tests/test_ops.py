@@ -1,9 +1,9 @@
-"""Phase A: ops tests updated for Densologie Scoreboard pipeline constants."""
+"""Ops tests: sync_health and check_stale_sync against all SYNC_SOURCES."""
 
 from types import SimpleNamespace
 
 from app_dashboard.ops import build_stale_message, check_stale_sync, sync_health
-from app_dashboard.pipeline import SOURCE
+from app_dashboard.pipeline import SYNC_SOURCES
 
 
 def _settings(webhook="http://hook"):
@@ -24,12 +24,14 @@ def _capture():
 
 
 def _synced(db, ago_sql):
-    db.execute(
-        f"insert into sync_state (source, cursor, last_synced_at) "
-        f"values (%s, null, now() - interval %s) "
-        "on conflict (source) do update set last_synced_at = excluded.last_synced_at",
-        (SOURCE, ago_sql),
-    )
+    """Seed ALL sync sources to the same age so health checks see a consistent state."""
+    for src in SYNC_SOURCES:
+        db.execute(
+            "insert into sync_state (source, cursor, last_synced_at) "
+            "values (%s, null, now() - (%s::interval)) "
+            "on conflict (source) do update set last_synced_at = excluded.last_synced_at",
+            (src, ago_sql),
+        )
     db.commit()
 
 
