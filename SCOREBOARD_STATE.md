@@ -37,8 +37,14 @@ Earlier UI items already built (Phase C2) that need design review in same pass:
 
 **Protocol:** STOP after UI build (GATE 3) and report with screenshots before deploying to Fly.io.
 
-### Next action
-Run T30 + long-history cohort (small focused agent) → confirm 34/34 tests → then GATE 3 UI build.
+### Current action
+**GATE 3 UI deployed to https://densologie-scoreboard.fly.dev — awaiting design review.**
+
+Seed on Neon: 290 customers (250 regular + 40 long-history Jan 2025), 496 orders, 217 subs, 825 subscription_events, 4960 upsell_events, 1350 GA4 rows, 12 paused subs, 10 win-backs, 31 ad_spend rows for Jan 2025 cohort.
+
+Test values confirmed on live seed:
+- Jan 2025 cohort 12m LTV: $563.27 (40 customers)
+- Jan 2025 payback: M1, CAC=$178.25
 
 ---
 

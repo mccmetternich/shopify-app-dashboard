@@ -16,8 +16,8 @@ Last updated: 2026-08-24. GATE 2 ACCEPTED. Additions T30–T32 + long-history co
 | P2 | `SCOREBOARD_STATE.md` updated each session | **IN PROGRESS** | Ongoing |
 | G1 | GATE 1 — `docs/METRICS_DEFINITIONS.md` written + architect review | **ACCEPTED** | All 14 flags resolved + Section 12 (pause/reactivation) |
 | G2 | GATE 2 — seed extensions + all tests passing + reviewed | **ACCEPTED** | 31/31 pass; pause/reactivation lifecycle included; deployed to Neon+Fly |
-| G2-add | GATE 2 additions — T30 (AR2d close) + long-history cohort + T31/T32 | **IN PROGRESS** | Required before GATE 3 |
-| G3 | GATE 3 — UI on seed data + design reviewed | NOT STARTED | Starts after G2-add complete |
+| G2-add | GATE 2 additions — T30 (AR2d close) + long-history cohort + T31/T32 | **TESTED-PASS** | 34/34 pass; Jan 2025 LTV=$563, payback=M1, CAC=$178.25 |
+| G3 | GATE 3 — UI on seed data + design reviewed | **IN PROGRESS** | Built 2026-08-24; deployed to Fly for design review |
 
 ### Accounting Rules (documented in METRICS_DEFINITIONS.md)
 
