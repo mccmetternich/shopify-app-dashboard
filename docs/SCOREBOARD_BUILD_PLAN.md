@@ -6,7 +6,7 @@
 
 ## STATUS LEDGER
 
-Last updated: 2026-08-24. GATE 2 COMPLETE — 22/22 tests pass, seed verified against Neon.
+Last updated: 2026-08-24. GATE 2 ACCEPTED. Additions T30–T32 + long-history cohort in progress. GATE 3 UI approved to start after.
 
 ### Meta / Gates
 
@@ -14,9 +14,10 @@ Last updated: 2026-08-24. GATE 2 COMPLETE — 22/22 tests pass, seed verified ag
 |---|-------------|--------|-------|
 | P1 | `docs/SCOREBOARD_BUILD_PLAN.md` — protocol + spec | **ACCEPTED** | This file |
 | P2 | `SCOREBOARD_STATE.md` updated each session | **IN PROGRESS** | Ongoing |
-| G1 | GATE 1 — `docs/METRICS_DEFINITIONS.md` written + architect review | **ACCEPTED** | All 14 flags resolved 2026-08-24 |
-| G2 | GATE 2 — seed extensions + all tests passing + reviewed | **TESTED-PASS** | 22/22 tests pass 2026-08-24 |
-| G3 | GATE 3 — UI on seed data + design reviewed | NOT STARTED | Awaiting GATE 2 approval |
+| G1 | GATE 1 — `docs/METRICS_DEFINITIONS.md` written + architect review | **ACCEPTED** | All 14 flags resolved + Section 12 (pause/reactivation) |
+| G2 | GATE 2 — seed extensions + all tests passing + reviewed | **ACCEPTED** | 31/31 pass; pause/reactivation lifecycle included; deployed to Neon+Fly |
+| G2-add | GATE 2 additions — T30 (AR2d close) + long-history cohort + T31/T32 | **IN PROGRESS** | Required before GATE 3 |
+| G3 | GATE 3 — UI on seed data + design reviewed | NOT STARTED | Starts after G2-add complete |
 
 ### Accounting Rules (documented in METRICS_DEFINITIONS.md)
 

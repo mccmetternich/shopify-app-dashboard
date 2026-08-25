@@ -7,15 +7,38 @@ Repo: `mccmetternich/shopify-app-dashboard` (working name until rename).
 
 ## Current Position (2026-08-24)
 
-**At GATE 1.** `docs/METRICS_DEFINITIONS.md` written. Awaiting architect answers to 13 flagged questions before proceeding to seed + tests (GATE 2). All flags listed in METRICS_DEFINITIONS.md open-questions table.
+**Between GATE 2 and GATE 3.** GATE 2 accepted by architect. Two small additions required before GATE 3 UI starts, then full UI build.
 
-**Critical blockers (cannot seed or build UI without answers):**
-- [FLAG-C1] COGS per SKU (blocks LTV, payback, offer-segmented GP curves)
-- [FLAG-A1] Monthly subscription prices ($129 serum confirmed?)
-- [FLAG-G1] Upsell SKUs / order property keys from Shopify store
-- [FLAG-H1] Landing-page URL patterns for PDP/listicle/lander classification
+### What is done and on main/deployed
+- Gate 1: METRICS_DEFINITIONS.md approved (all 14 flags resolved + Section 12 pause/reactivation)
+- Gate 2: 31/31 tests pass (`tests/test_gate2_metrics.py`)
+- Migrations 021–029 applied to Neon and deployed on Fly.io
+- 26 new stats functions in stats.py
+- Seed: 250 customers + 90-day history + long-history placeholders on Neon
+- Docs: SCOREBOARD_BUILD_PLAN.md + METRICS_DEFINITIONS.md committed on main
 
-**Next action:** Matthias relays flags to architect → answers come back → resume at GATE 2 (seed extensions + tests).
+### Required before GATE 3 UI (architect-approved additions)
+1. **T30** — explicit involuntary revenue churn test with exact dollar assert (closes AR2d)
+2. **Long-history cohort** — seed 40 customers from Jan 2025 (18 months of history) so `cohort_ltv_12m()` and `payback_timing()` are exercised with real numbers, not just proven to return empty on 90-day window
+3. **T31, T32** — tests asserting real values from cohort_ltv_12m() and payback_timing() for the Jan 2025 cohort
+
+### GATE 3 UI scope (approved by architect)
+Pages to build (in order):
+1. `/subscriptions` — waterfall v2, 4 churn metrics, retention grid with benchmark bands, pause lifecycle, LTV, payback table, reactivation stats
+2. `/cohorts` update — add offer-segmented 2×2 cohort grid (existing page)
+3. `/upsell` — three revenue streams, 5 upsell take-rate tiles, serum vs serum+capsules LTV
+4. `/quality` — order integrity %, orphaned rebills, last-sync-per-source
+5. `/settings/costs` — editable COGS table, POST handler
+6. `overview.html` — add three-revenue-streams card
+7. `base.html` — add nav links for all new pages
+
+Earlier UI items already built (Phase C2) that need design review in same pass:
+- Stale-sync banner with timestamp, DoC in KPI row, summary line, Meta section, period comparison, amber weakest funnel step
+
+**Protocol:** STOP after UI build (GATE 3) and report with screenshots before deploying to Fly.io.
+
+### Next action
+Run T30 + long-history cohort (small focused agent) → confirm 34/34 tests → then GATE 3 UI build.
 
 ---
 
