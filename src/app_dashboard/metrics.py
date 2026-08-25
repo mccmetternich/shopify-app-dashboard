@@ -66,6 +66,10 @@ class Metric:
     """Industry or best-practice benchmark, written in plain English for the info popover."""
 
 
+# Canonical set of allowed unit values.  Import this in tests rather than
+# hardcoding a tuple — one place to update when a new unit is added.
+VALID_UNITS: frozenset[str] = frozenset({"currency", "count", "percent", "ratio", "days", "text"})
+
 METRICS: dict[str, Metric] = {
 
     # ── Overview headline tiles ─────────────────────────────────────────────

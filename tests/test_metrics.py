@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 
-from app_dashboard.metrics import COMPARE_LABEL, METRICS, signed
+from app_dashboard.metrics import COMPARE_LABEL, METRICS, VALID_UNITS, signed
 from app_dashboard.stats import COMPARED
 
 
@@ -20,7 +20,7 @@ def test_every_metric_is_fully_defined(key):
     # the field is that it is checkable against the query.
     assert m.rule.strip().lower() != m.name.strip().lower()
     assert m.kind in COMPARE_LABEL, f"{key} has no comparison label for {m.kind!r}"
-    assert m.unit in ("count", "usd", "pct")
+    assert m.unit in VALID_UNITS, f"{key}.unit={m.unit!r} is not in VALID_UNITS {VALID_UNITS}"
     assert m.better in (None, "up", "down")
 
 
