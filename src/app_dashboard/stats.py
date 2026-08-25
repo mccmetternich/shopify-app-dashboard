@@ -2313,12 +2313,13 @@ def subscription_waterfall_v2(conn: psycopg.Connection, year: int, month: int) -
 
     # Independent measurement — breaks the tautology.
     ending_mrr_actual = _ending_mrr_actual(conn, year, month)
-    if ending_mrr_actual is not None:
+    checked = ending_mrr_actual is not None
+    if checked:
         reconcile_delta = ending_mrr_actual - ending_mrr_events
         reconciled = abs(reconcile_delta) <= _WATERFALL_RECONCILE_TOLERANCE
     else:
         reconcile_delta = None
-        reconciled = True  # no measurement available; don't gate on absence of data
+        reconciled = False  # no measurement — explicitly unchecked, not passing
 
     return {
         "beginning_mrr":        base["beginning_mrr"],
@@ -2330,6 +2331,7 @@ def subscription_waterfall_v2(conn: psycopg.Connection, year: int, month: int) -
         "churned_mrr_involuntary": base["churned_mrr_involuntary"],
         "ending_mrr":           ending_mrr_events,
         "ending_mrr_actual":    ending_mrr_actual,
+        "checked":              checked,
         "reconciled":           reconciled,
         "reconcile_delta":      reconcile_delta,
     }
@@ -2577,6 +2579,36 @@ def omnisend_summary(conn: psycopg.Connection, window_days: int, total_revenue) 
     }
 
 
+def omnisend_flow_vs_campaign_split(conn: psycopg.Connection, window_days: int) -> dict:
+    """Returns flow vs campaign revenue split for the Omnisend card.
+
+    Flows have a non-empty flow_name. Campaigns have a non-empty campaign_name.
+    """
+    cutoff = _utcnow() - timedelta(days=window_days)
+    try:
+        rows = conn.execute(
+            """
+            select
+                case when flow_name is not null and flow_name != '' then 'flow' else 'campaign' end as kind,
+                coalesce(sum(attributed_revenue), 0) as revenue
+            from omnisend_sends
+            where date >= %s
+            group by 1
+            """,
+            (cutoff.date(),),
+        ).fetchall()
+    except Exception:
+        return {"flow_revenue": None, "campaign_revenue": None}
+
+    result = {"flow_revenue": Decimal("0"), "campaign_revenue": Decimal("0")}
+    for kind, revenue in rows:
+        if kind == "flow":
+            result["flow_revenue"] = Decimal(str(revenue))
+        else:
+            result["campaign_revenue"] = Decimal(str(revenue))
+    return result
+
+
 # ── Data quality stats ────────────────────────────────────────────────────────
 
 def data_quality_stats(conn: psycopg.Connection) -> dict:
@@ -2608,17 +2640,18 @@ def data_quality_stats(conn: psycopg.Connection) -> dict:
     ).fetchone()[0] or 0
 
     # Try to get sync state — table may not exist yet
-    # Column is `source` (not `source_key`); also pull last_error for quality page.
+    # Column is `source` (not `source_key`); also pull last_error and meta for quality page.
     last_sync_per_source: dict[str, dict] = {}
     try:
         rows = conn.execute(
-            "select source, last_synced_at, last_error, last_error_at from sync_state"
+            "select source, last_synced_at, last_error, last_error_at, meta from sync_state"
         ).fetchall()
-        for src, last_synced_at, last_error, last_error_at in rows:
+        for src, last_synced_at, last_error, last_error_at, meta in rows:
             last_sync_per_source[src] = {
-                "synced_at":    last_synced_at,
-                "last_error":   last_error,
-                "last_error_at": last_error_at,
+                "synced_at":      last_synced_at,
+                "last_error":     last_error,
+                "last_error_at":  last_error_at,
+                "meta":           meta or {},
             }
     except Exception:
         pass  # sync_state table not present yet (pre-migration env)
@@ -2633,6 +2666,9 @@ def data_quality_stats(conn: psycopg.Connection) -> dict:
         synced_at = entry.get("synced_at")
         last_error  = entry.get("last_error")
         error_at    = entry.get("last_error_at")
+        meta        = entry.get("meta", {})
+        # non_usd_skipped is written per-sync by ingest_recharge; None for other sources.
+        non_usd_skipped = meta.get("non_usd_skipped") if src == "recharge_charges" else None
         if synced_at is None:
             age_minutes = None
             age_str = "Never"
@@ -2653,12 +2689,13 @@ def data_quality_stats(conn: psycopg.Connection) -> dict:
             else:
                 status = "ok"
         source_rows.append({
-            "source":       src,
-            "synced_at":    synced_at,
-            "age_str":      age_str,
-            "status":       status,
-            "last_error":   last_error,
-            "last_error_at": error_at,
+            "source":           src,
+            "synced_at":        synced_at,
+            "age_str":          age_str,
+            "status":           status,
+            "last_error":       last_error,
+            "last_error_at":    error_at,
+            "non_usd_skipped":  non_usd_skipped,
         })
 
     return {
@@ -2776,4 +2813,518 @@ def serum_vs_capsules_ltv(conn: psycopg.Connection) -> dict:
         "serum_capsules": {"ltv": serum_caps_ltv, "count": len(serum_caps_ids)},
         "delta": delta,
         "delta_pct": delta_pct,
+    }
+
+
+def daily_revenue_and_spend(conn: psycopg.Connection, window_days: int) -> list[dict]:
+    """Daily revenue and ad spend for the hero chart.
+
+    Returns [{date, revenue, spend}] ordered oldest-first.
+    Revenue = sum(total - refunded) per day from orders.
+    Spend = sum(spend) per day from ad_spend.
+    Days with orders but no spend show spend=0. Always returns window_days rows.
+    """
+    cutoff = _utcnow() - timedelta(days=window_days)
+    rows = conn.execute(
+        """
+        with days as (
+            select generate_series(
+                %s::date,
+                current_date,
+                '1 day'::interval
+            )::date as d
+        ),
+        rev as (
+            select created_at::date as d, sum(total - refunded) as revenue
+            from orders
+            where created_at >= %s
+            group by 1
+        ),
+        spend as (
+            select date as d, sum(spend) as spend
+            from ad_spend
+            where date >= %s::date
+            group by 1
+        )
+        select days.d,
+               coalesce(rev.revenue, 0) as revenue,
+               coalesce(spend.spend, 0) as spend
+        from days
+        left join rev   on rev.d   = days.d
+        left join spend on spend.d = days.d
+        order by days.d
+        """,
+        (cutoff.date(), cutoff, cutoff.date()),
+    ).fetchall()
+
+    return [
+        {"date": r[0], "revenue": Decimal(str(r[1])), "spend": Decimal(str(r[2]))}
+        for r in rows
+    ]
+
+
+def subscription_movement_summary(conn: psycopg.Connection, year: int, month: int) -> dict | None:
+    """Counts of new/expansion/contraction/churn events for the given month.
+
+    Used to show a human-readable summary above the MRR waterfall:
+    "This month: 5 new subscribers, 3 expansions, 1 contraction, 2 cancellations"
+    Returns None if no events exist for the period.
+    """
+    from calendar import monthrange
+    _, last_day = monthrange(year, month)
+    start = f"{year:04d}-{month:02d}-01"
+    end = f"{year:04d}-{month:02d}-{last_day:02d}"
+
+    rows = conn.execute(
+        """
+        select event_type, count(*), coalesce(sum(mrr_delta), 0) as mrr_sum
+        from subscription_events
+        where event_date between %s and %s
+          and event_type in ('new', 'expansion', 'contraction', 'churn', 'winback')
+        group by event_type
+        """,
+        (start, end),
+    ).fetchall()
+
+    if not rows:
+        return None
+
+    by_type = {r[0]: {"count": r[1], "mrr": Decimal(str(r[2]))} for r in rows}
+    return {
+        "new": by_type.get("new", {"count": 0, "mrr": Decimal("0")}),
+        "expansion": by_type.get("expansion", {"count": 0, "mrr": Decimal("0")}),
+        "contraction": by_type.get("contraction", {"count": 0, "mrr": Decimal("0")}),
+        "churn": by_type.get("churn", {"count": 0, "mrr": Decimal("0")}),
+        "winback": by_type.get("winback", {"count": 0, "mrr": Decimal("0")}),
+    }
+
+
+def gross_profit_summary(conn: psycopg.Connection, window_days: int) -> dict | None:
+    """Gross profit waterfall for the selected window.
+
+    Returns None if there are no orders in the window.
+
+    The waterfall:
+        gross_revenue
+        - refunds          = net_revenue
+        - cogs             (estimated from cost_inputs × line_item quantities)
+        - shipping         (shipping_cost_per_order × order_count)
+        - payment_fees     (payment_fee_pct × gross_revenue)
+                           = gross_profit
+        - ad_spend         (sum of ad_spend in window)
+                           = profit_after_ads
+
+    cogs_estimated = True when any order line item SKU is missing from cost_inputs
+    (i.e. the GP calculation had to fall back to $0 COGS for that SKU).
+    """
+    cutoff = _utcnow() - timedelta(days=window_days)
+
+    # Load cost settings
+    try:
+        cs_rows = conn.execute("select key, value from cost_settings").fetchall()
+        cost_settings = {r[0]: Decimal(str(r[1])) for r in cs_rows}
+    except Exception:
+        cost_settings = {}
+    shipping_cost = cost_settings.get("shipping_cost_per_order", Decimal("0"))
+    payment_fee_pct = cost_settings.get("payment_fee_pct", Decimal("0"))
+
+    # Load COGS per SKU
+    try:
+        ci_rows = conn.execute("select sku, cogs_per_unit from cost_inputs").fetchall()
+        cogs_map = {r[0]: Decimal(str(r[1])) for r in ci_rows}
+    except Exception:
+        cogs_map = {}
+
+    # Fetch orders in window
+    try:
+        order_rows = conn.execute(
+            """
+            select total, refunded, line_items
+            from orders
+            where created_at >= %s
+            """,
+            (cutoff,),
+        ).fetchall()
+    except Exception:
+        return None
+
+    if not order_rows:
+        return None
+
+    gross_revenue = Decimal("0")
+    refunds = Decimal("0")
+    cogs = Decimal("0")
+    cogs_estimated = False
+    order_count = len(order_rows)
+
+    for total, refunded, line_items in order_rows:
+        gross_revenue += Decimal(str(total or 0))
+        refunds += Decimal(str(refunded or 0))
+
+        # Sum COGS for each line item
+        if isinstance(line_items, list):
+            for item in line_items:
+                sku = item.get("sku", "") if isinstance(item, dict) else ""
+                qty = int(item.get("quantity", 1)) if isinstance(item, dict) else 1
+                if sku and sku in cogs_map:
+                    cogs += cogs_map[sku] * qty
+                elif sku:
+                    cogs_estimated = True
+                    # No COGS for unknown SKU — falls through as $0
+
+    net_revenue = gross_revenue - refunds
+    shipping = shipping_cost * order_count
+    payment_fees = payment_fee_pct * gross_revenue
+
+    gross_profit = net_revenue - cogs - shipping - payment_fees
+
+    # Ad spend in window
+    try:
+        spend_row = conn.execute(
+            "select coalesce(sum(spend), 0) from ad_spend where date >= %s",
+            (cutoff.date(),),
+        ).fetchone()
+        ad_spend = Decimal(str(spend_row[0])) if spend_row else Decimal("0")
+    except Exception:
+        ad_spend = Decimal("0")
+
+    profit_after_ads = gross_profit - ad_spend
+    gross_margin_pct = float(gross_profit / net_revenue * 100) if net_revenue > 0 else 0.0
+
+    return {
+        "gross_revenue": gross_revenue,
+        "refunds": refunds,
+        "net_revenue": net_revenue,
+        "cogs": cogs,
+        "shipping": shipping,
+        "payment_fees": payment_fees,
+        "gross_profit": gross_profit,
+        "ad_spend": ad_spend,
+        "profit_after_ads": profit_after_ads,
+        "gross_margin_pct": gross_margin_pct,
+        "cogs_estimated": cogs_estimated,
+        "order_count": order_count,
+    }
+
+
+# ── Setup checklist ──────────────────────────────────────────────────────────
+
+def setup_checklist(conn: psycopg.Connection, settings) -> dict:
+    """Returns a setup readiness checklist for the operator.
+
+    Each group has items with: label, status (done/pending/warning), detail, action.
+    Also returns overall counts for a progress summary.
+    """
+
+    def _sync_state_has_row(source: str) -> bool:
+        """True if sync_state has a row with last_synced_at not null for this source."""
+        try:
+            row = conn.execute(
+                "SELECT last_synced_at FROM sync_state WHERE source = %s",
+                (source,),
+            ).fetchone()
+            return row is not None and row[0] is not None
+        except Exception:
+            return False
+
+    items_data_sources = []
+
+    # 1. Shopify orders
+    shopify_token = getattr(settings, "shopify_admin_token", None)
+    shopify_domain = getattr(settings, "shopify_shop_domain", None)
+    shopify_creds = bool(shopify_token and shopify_domain)
+    if shopify_creds:
+        if _sync_state_has_row("shopify_orders"):
+            items_data_sources.append({
+                "label": "Shopify orders",
+                "status": "done",
+                "detail": "Shopify is connected and syncing orders.",
+                "action": "",
+                "action_url": None,
+            })
+        else:
+            items_data_sources.append({
+                "label": "Shopify orders",
+                "status": "warning",
+                "detail": "Shopify token is set but no data has synced yet. Check logs.",
+                "action": "Set SHOPIFY_ADMIN_TOKEN and SHOPIFY_SHOP_DOMAIN environment variables.",
+                "action_url": None,
+            })
+    else:
+        items_data_sources.append({
+            "label": "Shopify orders",
+            "status": "pending",
+            "detail": "Shopify is not connected.",
+            "action": "Set SHOPIFY_ADMIN_TOKEN and SHOPIFY_SHOP_DOMAIN environment variables.",
+            "action_url": None,
+        })
+
+    # 2. Orders in database
+    try:
+        order_count = conn.execute("SELECT count(*) FROM orders").fetchone()[0]
+    except Exception:
+        order_count = 0
+    if order_count > 0:
+        items_data_sources.append({
+            "label": "Orders in database",
+            "status": "done",
+            "detail": f"Orders table has data. ({order_count:,} orders)",
+            "action": "",
+            "action_url": None,
+        })
+    else:
+        items_data_sources.append({
+            "label": "Orders in database",
+            "status": "pending",
+            "detail": "No orders yet. Connect Shopify and wait for the first sync.",
+            "action": "",
+            "action_url": None,
+        })
+
+    # 3. Meta Ads
+    meta_token = getattr(settings, "meta_access_token", None)
+    meta_account = getattr(settings, "meta_account_id", None)
+    meta_creds = bool(meta_token and meta_account)
+    if meta_creds:
+        if _sync_state_has_row("meta_ad_spend"):
+            items_data_sources.append({
+                "label": "Meta Ads",
+                "status": "done",
+                "detail": "Meta Ads is connected and syncing ad spend.",
+                "action": "",
+                "action_url": None,
+            })
+        else:
+            items_data_sources.append({
+                "label": "Meta Ads",
+                "status": "warning",
+                "detail": "Meta token is set but no data has synced yet.",
+                "action": "Set META_ACCESS_TOKEN and META_ACCOUNT_ID.",
+                "action_url": None,
+            })
+    else:
+        items_data_sources.append({
+            "label": "Meta Ads",
+            "status": "pending",
+            "detail": "Meta Ads is not connected. You'll see $0 ad spend.",
+            "action": "Set META_ACCESS_TOKEN and META_ACCOUNT_ID.",
+            "action_url": None,
+        })
+
+    # 4. Recharge subscriptions
+    recharge_token = getattr(settings, "recharge_api_token", None)
+    if recharge_token:
+        if _sync_state_has_row("recharge_charges"):
+            items_data_sources.append({
+                "label": "Recharge subscriptions",
+                "status": "done",
+                "detail": "Recharge is connected and syncing subscription data.",
+                "action": "",
+                "action_url": None,
+            })
+        else:
+            items_data_sources.append({
+                "label": "Recharge subscriptions",
+                "status": "warning",
+                "detail": "Recharge token is set but no charges have synced yet.",
+                "action": "Set RECHARGE_API_TOKEN.",
+                "action_url": None,
+            })
+    else:
+        items_data_sources.append({
+            "label": "Recharge subscriptions",
+            "status": "pending",
+            "detail": "Recharge is not connected. Subscription revenue will be empty.",
+            "action": "Set RECHARGE_API_TOKEN.",
+            "action_url": None,
+        })
+
+    # 5. Google Analytics (GA4)
+    ga4_property = getattr(settings, "ga4_property_id", None)
+    try:
+        ga4_count = conn.execute("SELECT count(*) FROM ga4_funnel").fetchone()[0]
+    except Exception:
+        ga4_count = 0
+    if ga4_count > 0:
+        items_data_sources.append({
+            "label": "Google Analytics (GA4)",
+            "status": "done",
+            "detail": f"GA4 funnel data is flowing. ({ga4_count:,} rows)",
+            "action": "",
+            "action_url": None,
+        })
+    elif ga4_property:
+        items_data_sources.append({
+            "label": "Google Analytics (GA4)",
+            "status": "warning",
+            "detail": "GA4 property is set but no funnel rows have synced yet.",
+            "action": "Set GA4_PROPERTY_ID and GOOGLE_APPLICATION_CREDENTIALS, then wire ingest_ga4 to the scheduler.",
+            "action_url": None,
+        })
+    else:
+        items_data_sources.append({
+            "label": "Google Analytics (GA4)",
+            "status": "pending",
+            "detail": "GA4 is not connected. The acquisition funnel will show seed data only.",
+            "action": "Set GA4_PROPERTY_ID and GOOGLE_APPLICATION_CREDENTIALS, then wire ingest_ga4 to the scheduler.",
+            "action_url": None,
+        })
+
+    # 6. Email / Omnisend
+    try:
+        omnisend_count = conn.execute("SELECT count(*) FROM omnisend_sends").fetchone()[0]
+    except Exception:
+        omnisend_count = 0
+    if omnisend_count > 0:
+        items_data_sources.append({
+            "label": "Email / Omnisend",
+            "status": "done",
+            "detail": "Omnisend email data is flowing.",
+            "action": "",
+            "action_url": None,
+        })
+    else:
+        items_data_sources.append({
+            "label": "Email / Omnisend",
+            "status": "pending",
+            "detail": "Omnisend is not connected. Email metrics will show seed data only.",
+            "action": "Set OMNISEND_API_KEY, then wire ingest_omnisend to the scheduler.",
+            "action_url": None,
+        })
+
+    # GROUP: Cost Configuration
+    items_cost = []
+
+    # 7. Product costs (COGS)
+    DEFAULT_COGS = {Decimal("3.50"), Decimal("5.00"), Decimal("8.50"), Decimal("10.50")}
+    try:
+        cost_row = conn.execute(
+            "SELECT COUNT(*) as total, COUNT(CASE WHEN cogs_per_unit > 0 THEN 1 END) as set_count"
+            " FROM cost_inputs"
+        ).fetchone()
+        cogs_total = cost_row[0] if cost_row else 0
+        cogs_set = cost_row[1] if cost_row else 0
+    except Exception:
+        cogs_total = 0
+        cogs_set = 0
+
+    if cogs_total == 0:
+        items_cost.append({
+            "label": "Product costs (COGS)",
+            "status": "pending",
+            "detail": "No product costs set. Profit margins cannot be calculated.",
+            "action": "Go to Cost Settings to enter your real COGS per product.",
+            "action_url": "/settings/costs",
+        })
+    else:
+        # Check if any cogs_per_unit matches exactly a default placeholder value
+        try:
+            cogs_values = conn.execute(
+                "SELECT cogs_per_unit FROM cost_inputs WHERE cogs_per_unit > 0"
+            ).fetchall()
+            has_defaults = any(Decimal(str(r[0])) in DEFAULT_COGS for r in cogs_values)
+        except Exception:
+            has_defaults = False
+
+        if has_defaults:
+            items_cost.append({
+                "label": "Product costs (COGS)",
+                "status": "warning",
+                "detail": "Product costs look like placeholder values. Update with your actual COGS.",
+                "action": "Go to Cost Settings to enter your real COGS per product.",
+                "action_url": "/settings/costs",
+            })
+        else:
+            items_cost.append({
+                "label": "Product costs (COGS)",
+                "status": "done",
+                "detail": "Product costs are configured. Profit calculations are active.",
+                "action": "",
+                "action_url": "/settings/costs",
+            })
+
+    # 8. Shipping & payment fees
+    try:
+        shipping_row = conn.execute(
+            "SELECT value FROM cost_settings WHERE key = 'shipping_cost_per_order'"
+        ).fetchone()
+        payment_row = conn.execute(
+            "SELECT value FROM cost_settings WHERE key = 'payment_fee_pct'"
+        ).fetchone()
+        fees_configured = shipping_row is not None and payment_row is not None
+    except Exception:
+        fees_configured = False
+
+    if fees_configured:
+        items_cost.append({
+            "label": "Shipping & payment fees",
+            "status": "done",
+            "detail": "Shipping and payment fee rates are configured.",
+            "action": "",
+            "action_url": "/settings/costs",
+        })
+    else:
+        items_cost.append({
+            "label": "Shipping & payment fees",
+            "status": "pending",
+            "detail": "Shipping and payment fee rates are not set.",
+            "action": "Go to Cost Settings to enter your shipping cost and payment processor rate.",
+            "action_url": "/settings/costs",
+        })
+
+    # GROUP: Notifications & Access
+    items_notifications = []
+
+    # 9. Google SSO
+    google_client_id = getattr(settings, "google_client_id", None)
+    if bool(google_client_id):
+        items_notifications.append({
+            "label": "Google SSO",
+            "status": "done",
+            "detail": "Google sign-in is enabled for annotations and admin access.",
+            "action": "",
+            "action_url": None,
+        })
+    else:
+        items_notifications.append({
+            "label": "Google SSO",
+            "status": "pending",
+            "detail": "Google SSO is not configured. You can still use username/password login.",
+            "action": "Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET for SSO.",
+            "action_url": None,
+        })
+
+    # 10. Slack alerts
+    slack_webhook = getattr(settings, "slack_webhook_url", None)
+    if bool(slack_webhook):
+        items_notifications.append({
+            "label": "Slack alerts",
+            "status": "done",
+            "detail": "Slack alerts are active. You'll be notified if data goes stale.",
+            "action": "",
+            "action_url": None,
+        })
+    else:
+        items_notifications.append({
+            "label": "Slack alerts",
+            "status": "pending",
+            "detail": "Slack alerts are not set up. You won't be notified of data issues.",
+            "action": "Set SLACK_WEBHOOK_URL to receive weekly digests and stale data alerts.",
+            "action_url": None,
+        })
+
+    groups = [
+        {"title": "Data Sources", "items": items_data_sources},
+        {"title": "Cost Configuration", "items": items_cost},
+        {"title": "Notifications & Access", "items": items_notifications},
+    ]
+
+    all_items = items_data_sources + items_cost + items_notifications
+    done_count = sum(1 for it in all_items if it["status"] == "done")
+    total_count = len(all_items)
+
+    return {
+        "groups": groups,
+        "done_count": done_count,
+        "total_count": total_count,
     }

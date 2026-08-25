@@ -2,7 +2,7 @@
 {% import "_macros.html" as ui %}
 {% block pagehead %}
 <div class="page-head">
-    {{ ui.window_form("window", window, window_choices, "days") }}
+    {{ ui.window_form("window", window, window_choices, "days", start_date=start_date, end_date=end_date) }}
     <button type="button" id="copy-md" class="ghost">
         <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true">
             <rect x="5.2" y="2.2" width="8.6" height="11.6" rx="1.6"/><path d="M10.8 13.8H3.7a1.5 1.5 0 0 1-1.5-1.5V4.2"/>
@@ -19,6 +19,7 @@
 {% endblock %}
 {% block content %}
 <h1>Overview</h1>
+<p class="sub">Your business at a glance — revenue, new customers, ad performance, and email. Use the time window above to change the date range.</p>
 
 {% if summary_line %}
 <div class="summary-line">{{ summary_line }}</div>
@@ -84,17 +85,26 @@
     {% else %}{{ ui.stat("aov", "—") }}{% endif %}
 
     {% if repeat_rate.rate is not none %}
-    {{ ui.stat("repeat_purchase_rate", "%.0f"|format(repeat_rate.rate) ~ "%") }}
+    {{ ui.stat("repeat_purchase_rate", "%.0f"|format(repeat_rate.rate) ~ "%", compare=repeat_compare) }}
     {% else %}{{ ui.stat("repeat_purchase_rate", "—") }}{% endif %}
 
     {% if refunds.rate is not none %}
-    {{ ui.stat("refund_rate", "%.1f"|format(refunds.rate) ~ "%") }}
+    {{ ui.stat("refund_rate", "%.1f"|format(refunds.rate) ~ "%", compare=refund_compare) }}
     {% else %}{{ ui.stat("refund_rate", "—") }}{% endif %}
 </div>
 
+{# ── Hero chart: Revenue vs Ad Spend ── #}
+{% if daily_chart and daily_chart|length >= 2 %}
+<div class="card">
+    <h2>Revenue vs ad spend — daily</h2>
+    <p class="sub">The solid line is your daily net revenue. The dashed line is your ad spend. When revenue consistently sits well above spend, your margin is healthy.</p>
+    {{ ui.area_chart(daily_chart) }}
+</div>
+{% endif %}
+
 <div class="card">
     <h2 id="revenue-streams">Revenue streams</h2>
-    <p class="sub">New customer, subscription recurring, and non-sub repeat — mutually exclusive, last {{ window }} days.</p>
+    <p class="sub">Where your revenue comes from — split between new buyers, existing subscribers, and returning customers who aren't on a subscription.</p>
     {% if three_streams and three_streams.total is not none %}
     {% set ts = three_streams %}
     {% set total = ts.total %}
@@ -135,35 +145,113 @@
     {% endif %}
 </div>
 
+{# ── Approximate profit waterfall ── #}
+{% if gp_summary %}
+<div class="card">
+    <h2 id="profit">Approximate profit breakdown</h2>
+    <p class="sub">How much of your revenue is left after costs. Product costs are estimated — update them in <a href="/settings/costs">Cost Settings</a> for accuracy. Does not include team costs, software, or other overhead.</p>
+    <div class="table-card" style="margin-top:12px;">
+        <table>
+            <tbody>
+                <tr>
+                    <td>Gross revenue</td>
+                    <td class="num">${{ "%.0f"|format(gp_summary.gross_revenue) }}</td>
+                    <td></td>
+                </tr>
+                <tr>
+                    <td style="color:var(--down);">− Refunds</td>
+                    <td class="num" style="color:var(--down);">−${{ "%.0f"|format(gp_summary.refunds) }}</td>
+                    <td></td>
+                </tr>
+                <tr style="border-top:1px solid var(--border);">
+                    <td><strong>Net revenue</strong></td>
+                    <td class="num"><strong>${{ "%.0f"|format(gp_summary.net_revenue) }}</strong></td>
+                    <td></td>
+                </tr>
+                <tr>
+                    <td style="color:var(--sub);">− Product costs{% if gp_summary.cogs_estimated %} <sup title="Some SKUs missing from cost settings — estimate only">est.</sup>{% endif %}</td>
+                    <td class="num" style="color:var(--sub);">−${{ "%.0f"|format(gp_summary.cogs) }}</td>
+                    <td></td>
+                </tr>
+                <tr>
+                    <td style="color:var(--sub);">− Shipping</td>
+                    <td class="num" style="color:var(--sub);">−${{ "%.0f"|format(gp_summary.shipping) }}</td>
+                    <td></td>
+                </tr>
+                <tr>
+                    <td style="color:var(--sub);">− Payment fees</td>
+                    <td class="num" style="color:var(--sub);">−${{ "%.0f"|format(gp_summary.payment_fees) }}</td>
+                    <td></td>
+                </tr>
+                <tr style="border-top:2px solid var(--border);">
+                    <td><strong>Gross profit</strong></td>
+                    <td class="num"><strong>${{ "%.0f"|format(gp_summary.gross_profit) }}</strong></td>
+                    <td class="sub" style="font-size:12px;">{{ "%.1f"|format(gp_summary.gross_margin_pct) }}% margin</td>
+                </tr>
+                <tr>
+                    <td style="color:var(--down);">− Ad spend</td>
+                    <td class="num" style="color:var(--down);">−${{ "%.0f"|format(gp_summary.ad_spend) }}</td>
+                    <td></td>
+                </tr>
+                <tr style="border-top:1px solid var(--border);">
+                    <td><strong>After ads &amp; costs</strong></td>
+                    <td class="num"><strong{% if gp_summary.profit_after_ads < 0 %} style="color:var(--down);"{% endif %}>${{ "%.0f"|format(gp_summary.profit_after_ads|abs) }}{% if gp_summary.profit_after_ads < 0 %} loss{% endif %}</strong></td>
+                    <td></td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    {% if gp_summary.cogs_estimated %}
+    <p class="sub" style="margin-top:8px;">⚠ Some product SKUs are missing from your cost settings — product costs are underestimated. <a href="/settings/costs">Update COGS →</a></p>
+    {% endif %}
+</div>
+{% endif %}
+
 <div class="card">
     <h2 id="funnel">Acquisition funnel</h2>
     {% if funnel.has_data %}
-    <p class="sub">Sessions → Add to cart → Checkout → Purchase. Source: Google Analytics 4. Conversion rates are estimated from GA4 event counts, not a Shopify hard count.</p>
-    <div class="funnel-steps" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:12px 0;">
-        <div class="funnel-step" style="text-align:center;">
-            <div class="sub" style="font-size:12px;">Sessions</div>
-            <div style="font-family:var(--mono);font-weight:600;font-size:22px;">{{ "{:,}".format(funnel.sessions) }}</div>
-            <div class="sub">—</div>
+    <p class="sub">How visitors move from your website to a purchase. The weakest step — where most people drop off — is highlighted.</p>
+    <div style="margin:16px 0 8px;">
+        {# Sessions — always 100% width #}
+        <div class="bar-row">
+            <span class="bar-label" style="min-width:140px;font-size:13px;">Sessions</span>
+            <span class="bar-track"><span class="bar" style="width:100%;background:var(--brand-alpha,rgba(108,75,244,0.5));"></span></span>
+            <span class="bar-val">{{ "{:,}".format(funnel.sessions) }} <span class="sub">—</span></span>
         </div>
-        <div style="color:var(--muted);font-size:18px;">→</div>
-        <div class="funnel-step{% if funnel.weakest_step == 'atc' %} weak{% endif %}" style="text-align:center;">
-            <div class="sub" style="font-size:12px;">Add to cart</div>
-            <div style="font-family:var(--mono);font-weight:600;font-size:22px;">{{ "{:,}".format(funnel.add_to_carts) }}</div>
-            <div class="sub">{% if funnel.atc_rate is not none %}{{ funnel.atc_rate }}%{% else %}—{% endif %}</div>
+        {# Add to cart #}
+        <div class="bar-row{% if funnel.weakest_step == 'atc' %} weak-funnel{% endif %}">
+            <span class="bar-label" style="min-width:140px;font-size:13px;">Add to cart{% if funnel.weakest_step == 'atc' %} ⚠{% endif %}</span>
+            <span class="bar-track"><span class="bar" style="width:{{ (funnel.add_to_carts / funnel.sessions * 100)|round(1) if funnel.sessions else 0 }}%;background:var(--brand-alpha,rgba(108,75,244,0.5));"></span></span>
+            <span class="bar-val">{{ "{:,}".format(funnel.add_to_carts) }} <span class="sub">{% if funnel.atc_rate is not none %}{{ funnel.atc_rate }}% of sessions{% endif %}</span></span>
         </div>
-        <div style="color:var(--muted);font-size:18px;">→</div>
-        <div class="funnel-step{% if funnel.weakest_step == 'checkout' %} weak{% endif %}" style="text-align:center;">
-            <div class="sub" style="font-size:12px;">Checkout started</div>
-            <div style="font-family:var(--mono);font-weight:600;font-size:22px;">{{ "{:,}".format(funnel.begin_checkouts) }}</div>
-            <div class="sub">{% if funnel.checkout_rate is not none %}{{ funnel.checkout_rate }}%{% else %}—{% endif %}</div>
+        {# Checkout started #}
+        <div class="bar-row{% if funnel.weakest_step == 'checkout' %} weak-funnel{% endif %}">
+            <span class="bar-label" style="min-width:140px;font-size:13px;">Checkout started{% if funnel.weakest_step == 'checkout' %} ⚠{% endif %}</span>
+            <span class="bar-track"><span class="bar" style="width:{{ (funnel.begin_checkouts / funnel.sessions * 100)|round(1) if funnel.sessions else 0 }}%;background:var(--brand-alpha,rgba(108,75,244,0.5));"></span></span>
+            <span class="bar-val">{{ "{:,}".format(funnel.begin_checkouts) }} <span class="sub">{% if funnel.checkout_rate is not none %}{{ funnel.checkout_rate }}% of sessions{% endif %}</span></span>
         </div>
-        <div style="color:var(--muted);font-size:18px;">→</div>
-        <div class="funnel-step{% if funnel.weakest_step == 'purchase' %} weak{% endif %}" style="text-align:center;">
-            <div class="sub" style="font-size:12px;">Purchased</div>
-            <div style="font-family:var(--mono);font-weight:600;font-size:22px;">{{ "{:,}".format(funnel.purchases) }}</div>
-            <div class="sub">{% if funnel.purchase_rate is not none %}{{ funnel.purchase_rate }}%{% else %}—{% endif %}</div>
+        {# Purchased #}
+        <div class="bar-row{% if funnel.weakest_step == 'purchase' %} weak-funnel{% endif %}">
+            <span class="bar-label" style="min-width:140px;font-size:13px;">Purchased{% if funnel.weakest_step == 'purchase' %} ⚠{% endif %}</span>
+            <span class="bar-track"><span class="bar" style="width:{{ (funnel.purchases / funnel.sessions * 100)|round(1) if funnel.sessions else 0 }}%;background:var(--brand);"></span></span>
+            <span class="bar-val">{{ "{:,}".format(funnel.purchases) }} <span class="sub">{% if funnel.purchase_rate is not none %}{{ funnel.purchase_rate }}% of sessions{% endif %}</span></span>
         </div>
     </div>
+
+    {# Step-to-step conversion rates — these are the actionable numbers #}
+    {% set atc_to_checkout = (funnel.begin_checkouts / funnel.add_to_carts * 100)|round(1) if funnel.add_to_carts else none %}
+    {% set checkout_to_purchase = (funnel.purchases / funnel.begin_checkouts * 100)|round(1) if funnel.begin_checkouts else none %}
+    <div style="font-size:12px;color:var(--sub);margin-bottom:12px;">
+        Step-to-step:
+        {% if atc_to_checkout is not none %}ATC→Checkout {{ atc_to_checkout }}%{% endif %}
+        {% if checkout_to_purchase is not none %} · Checkout→Purchase {{ checkout_to_purchase }}%{% endif %}
+    </div>
+
+    {# Industry benchmarks #}
+    <p class="sub" style="font-size:12px;">
+        <strong>Typical DTC benchmarks:</strong> Sessions→ATC 8–15% · ATC→Checkout 40–60% · Checkout→Purchase 50–70%.
+        If your numbers are below these, the highlighted step is where to focus first.
+    </p>
     {% if funnel_sources %}
     <h3 style="margin-top:16px;font-size:13px;font-weight:600;">By traffic source <span class="sub" style="font-weight:400;">(estimated attribution)</span></h3>
     <table class="data-table">
@@ -185,7 +273,7 @@
     <p class="sub" style="margin-top:8px;"><strong>Note:</strong> "New Customers" above counts first-time buyers only (from Shopify). "Purchased" in the funnel counts all GA4 purchase events including repeat buyers — these will differ.</p>
     {% else %}
     <div class="empty-state">
-        <p class="sub">No GA4 data yet. Wire <code>GA4_PROPERTY_ID</code> and <code>GOOGLE_APPLICATION_CREDENTIALS</code> to start the funnel feed.</p>
+        <p class="sub">No Google Analytics data yet. Once GA4 is connected, you'll see how visitors are converting.</p>
     </div>
     {% endif %}
 </div>
@@ -197,6 +285,9 @@
         <div class="card stat">
             <div class="label">Sends</div>
             <div class="num">{{ "{:,}".format(omnisend.sends) }}</div>
+            {% if omnisend_prior_sends is defined and omnisend_prior_sends is not none and omnisend_prior_sends > 0 %}
+            <div class="delta">{{ ui.delta(omnisend.sends, omnisend_prior_sends) }}</div>
+            {% endif %}
         </div>
         <div class="card stat">
             <div class="label">Open rate</div>
@@ -217,7 +308,67 @@
         </div>
         {% endif %}
     </div>
-    <p class="sub" style="margin-bottom:8px;"><sup>~</sup> Revenue figures are Omnisend attribution estimates, not Shopify order counts. Use as directional only.</p>
+    <p class="sub" style="margin-bottom:8px;">How your email and SMS flows are performing. Open rate and click rate show engagement; attributed revenue is Omnisend's estimate of how much email drove — use it as a directional signal, not a hard number.</p>
+    {% if omnisend.open_rate is not none or omnisend.click_rate is not none %}
+    <h3 style="font-size:13px;font-weight:600;margin:14px 0 6px;">How you compare to DTC benchmarks</h3>
+    <table class="data-table">
+        <thead><tr><th>Metric</th><th class="num">Yours</th><th class="num">DTC Benchmark</th><th>Status</th></tr></thead>
+        <tbody>
+            {% if omnisend.open_rate is not none %}
+            <tr>
+                <td>Email open rate</td>
+                <td class="num">{{ omnisend.open_rate }}%</td>
+                <td class="num">25–35%</td>
+                <td>
+                    {% if omnisend.open_rate >= 25 %}<span class="pill installed">On target</span>
+                    {% else %}<span class="pill uninstalled">Below target</span>{% endif %}
+                </td>
+            </tr>
+            {% endif %}
+            {% if omnisend.click_rate is not none %}
+            <tr>
+                <td>Click rate</td>
+                <td class="num">{{ omnisend.click_rate }}%</td>
+                <td class="num">2–4%</td>
+                <td>
+                    {% if omnisend.click_rate >= 2 %}<span class="pill installed">On target</span>
+                    {% else %}<span class="pill uninstalled">Below target</span>{% endif %}
+                </td>
+            </tr>
+            {% endif %}
+            {% if omnisend.revenue_share is not none %}
+            <tr>
+                <td>Revenue from email</td>
+                <td class="num">{{ "%.0f"|format(omnisend.revenue_share) }}%</td>
+                <td class="num">15–30%</td>
+                <td>
+                    {% if omnisend.revenue_share >= 15 %}<span class="pill installed">On target</span>
+                    {% else %}<span class="pill uninstalled">Below target</span>{% endif %}
+                </td>
+            </tr>
+            {% endif %}
+        </tbody>
+    </table>
+    {% endif %}
+    {% if omnisend_split is defined and omnisend_split and (omnisend_split.flow_revenue or omnisend_split.campaign_revenue) %}
+    {% set total_split = (omnisend_split.flow_revenue or 0) + (omnisend_split.campaign_revenue or 0) %}
+    {% if total_split > 0 %}
+    <h3 style="font-size:13px;font-weight:600;margin:14px 0 6px;">Automated flows vs one-time campaigns</h3>
+    <p class="sub" style="margin-bottom:8px;">Automated flows (welcome series, abandoned cart, win-back) typically drive more revenue per send than one-time campaigns.</p>
+    <div style="display:flex;height:20px;border-radius:5px;overflow:hidden;gap:2px;margin-bottom:6px;">
+        {% if omnisend_split.flow_revenue > 0 %}
+        <div style="flex:{{ omnisend_split.flow_revenue|float }};background:var(--brand);" title="Flows ${{ '%.0f'|format(omnisend_split.flow_revenue) }}"></div>
+        {% endif %}
+        {% if omnisend_split.campaign_revenue > 0 %}
+        <div style="flex:{{ omnisend_split.campaign_revenue|float }};background:var(--mv-expansion);" title="Campaigns ${{ '%.0f'|format(omnisend_split.campaign_revenue) }}"></div>
+        {% endif %}
+    </div>
+    <div class="legend">
+        <span><i style="background:var(--brand)"></i>Automated flows ${{ "%.0f"|format(omnisend_split.flow_revenue or 0) }}</span>
+        <span><i style="background:var(--mv-expansion)"></i>One-time campaigns ${{ "%.0f"|format(omnisend_split.campaign_revenue or 0) }}</span>
+    </div>
+    {% endif %}
+    {% endif %}
     {% if omnisend.top_flows %}
     <h3 style="font-size:13px;font-weight:600;margin-bottom:6px;">Top flows &amp; campaigns</h3>
     <table class="data-table">
@@ -235,7 +386,7 @@
     {% endif %}
     {% else %}
     <div class="empty-state">
-        <p class="sub">No Omnisend data yet. Wire <code>OMNISEND_API_KEY</code> to start the email feed.</p>
+        <p class="sub">No email data yet. Connect Omnisend to see how your email campaigns are performing.</p>
     </div>
     {% endif %}
 </div>
@@ -277,7 +428,7 @@
             <div class="num">{% if meta.roas is not none %}{{ meta.roas }}x{% else %}—{% endif %}</div>
         </div>
     </div>
-    <p class="sub"><sup>~</sup> Meta purchases and ROAS are as reported by Meta's attribution model — estimated, not Shopify hard counts. The blended MER above is the ground truth for total ad efficiency.</p>
+    <p class="sub">Meta's purchase count and ROAS are estimates from their attribution model — they'll usually look better than reality. The MER above is a more honest measure of total ad efficiency.</p>
     {% if meta_campaigns %}
     <h3 style="font-size:13px;font-weight:600;margin:12px 0 6px;">By campaign / ad set</h3>
     <table class="data-table">
@@ -297,7 +448,7 @@
     {% endif %}
     {% else %}
     <div class="empty-state">
-        <p class="sub">No Meta data yet. Wire <code>META_ACCESS_TOKEN</code> and <code>META_ACCOUNT_ID</code> to start the ads feed.</p>
+        <p class="sub">No Meta Ads data yet. Connect your Meta account to see ad spend and performance.</p>
     </div>
     {% endif %}
 </div>
@@ -314,7 +465,7 @@
         <span class="bar-val">${{ "%.0f"|format(s.revenue) }} <span class="sub">({{ s.units }} units)</span></span>
     </div>
     {% endfor %}
-    <p class="sub">Net revenue allocated proportionally across SKUs in the order. Estimated — multi-SKU orders split by quantity.</p>
+    <p class="sub">Net revenue by product SKU for the selected period. Multi-SKU orders are split proportionally.</p>
     {% else %}
     <p class="sub">No order data yet.</p>
     {% endif %}
@@ -322,6 +473,7 @@
 
 <div class="card">
     <h2 id="abandoned-cart">Abandoned checkouts</h2>
+    <p class="sub">Customers who started checkout but didn't finish. Recovery revenue shows what was recaptured through follow-up flows.</p>
     {% if cart.abandoned > 0 %}
     <div class="cards" style="gap:12px;">
         <div class="card stat">
@@ -381,9 +533,10 @@
     {% else %}
     <p class="sub">No subscriptions yet.</p>
     {% endfor %}
-    <p class="sub">Each month is the sum of subscriptions active at that month-end. Annual plans count at one twelfth of their price.{% if notes %} A dot marks a month with a <a href="#annotations">note</a>.{% endif %}</p>
+    <p class="sub">Your total monthly recurring revenue at the end of each month. This is the most important number for a subscription business — track it like a heartbeat.{% if notes %} A dot marks a month with a <a href="#annotations">note</a>.{% endif %}</p>
 
     <h2 id="sub-movements">Subscription revenue movements</h2>
+    <p class="sub">What changed in your MRR each month. New subs and win-backs add to the bar; cancellations and contractions subtract. Net shows whether you grew or shrank.</p>
     <div class="legend">
         <span><i style="background: var(--mv-new)"></i>New</span>
         <span><i style="background: var(--mv-reactivation)"></i>Reactivation</span>
@@ -422,11 +575,12 @@
     {% else %}
     <p class="sub">No orders yet.</p>
     {% endfor %}
-    <p class="sub">Net revenue (total minus refunds) by calendar month.</p>
+    <p class="sub">Your total net revenue (sales minus refunds) by calendar month.</p>
 </div>
 
 <div class="card">
     <h2 id="activity">Orders vs refunds, last 6 months</h2>
+    <p class="sub">Orders placed versus orders refunded each month. A rising refund bar can signal product or expectation issues.</p>
     <div class="legend">
         <span><i style="background: var(--up)"></i>Orders</span>
         <span><i style="background: var(--down)"></i>Refunded</span>

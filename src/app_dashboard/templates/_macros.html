@@ -21,6 +21,9 @@
         <p class="defn-name">{{ m.name }}</p>
         <p>{{ m.definition }}</p>
         <p class="defn-rule">{{ m.rule }}</p>
+        {% if m.benchmark %}
+        <p class="defn-rule" style="color:var(--ok);margin-top:4px;">{{ m.benchmark }}</p>
+        {% endif %}
         <p class="defn-src">Source: {{ m.source }}</p>
     </div>
 </details>
@@ -90,18 +93,86 @@
 {% endif %}
 {% endmacro %}
 
-{#- A window picker. A plain GET form with a submit button rather than an
-    onchange handler: the CSP has no unsafe-inline for scripts, and a control
-    that only works with JavaScript is a control that silently stops working. -#}
-{% macro window_form(name, current, choices, unit, all_label=none) %}
-<form class="filters range" method="get">
-    <select name="{{ name }}" aria-label="Time range">
+{#- Hero area chart: revenue (filled area) and spend (dashed line) over time.
+    data = [{date, revenue, spend}] oldest-first.
+    Renders a responsive inline SVG. -#}
+{% macro area_chart(data, width=800, height=160) %}
+{% if data and data|length >= 2 %}
+{% set rev_vals = [] %}{% for d in data %}{% set _ = rev_vals.append(d.revenue|float) %}{% endfor %}
+{% set spend_vals = [] %}{% for d in data %}{% set _ = spend_vals.append(d.spend|float) %}{% endfor %}
+{% set all_vals = rev_vals + spend_vals %}
+{% set vmax = [all_vals|max, 1]|max %}
+{% set vmin = 0 %}
+{% set n = data|length %}
+{% set pad_left = 0 %}
+{% set pad_bottom = 24 %}
+{% set chart_w = width - pad_left %}
+{% set chart_h = height - pad_bottom %}
+
+{# Build revenue area points #}
+{% set rev_pts = namespace(s="") %}
+{% set spend_pts = namespace(s="") %}
+{% for d in data %}
+{% set x = (loop.index0 / (n - 1) * chart_w + pad_left)|round(1) %}
+{% set ry = (chart_h - (d.revenue|float / vmax * chart_h))|round(1) %}
+{% set sy = (chart_h - (d.spend|float / vmax * chart_h))|round(1) %}
+{% set rev_pts.s = rev_pts.s ~ x ~ "," ~ ry ~ " " %}
+{% set spend_pts.s = spend_pts.s ~ x ~ "," ~ sy ~ " " %}
+{% endfor %}
+
+{# Area fill: revenue polyline closed to bottom #}
+{% set first_x = 0 %}{% set last_x = (chart_w)|round(1) %}
+{% set area_pts = "0," ~ chart_h ~ " " ~ rev_pts.s ~ last_x ~ "," ~ chart_h %}
+
+{# X-axis labels: every 7 days or fewer ticks #}
+{% set tick_every = [1, (n // 6)|int]|max %}
+
+<figure class="hero-chart" style="margin:16px 0 0;padding:0;">
+<svg viewBox="0 0 {{ width }} {{ height }}" style="width:100%;height:auto;display:block;" aria-hidden="true">
+  {# Revenue filled area #}
+  <polygon points="{{ area_pts }}" fill="var(--brand)" opacity="0.12"/>
+  {# Revenue solid line #}
+  <polyline points="{{ rev_pts.s }}" fill="none" stroke="var(--brand)" stroke-width="2"/>
+  {# Spend dashed line #}
+  <polyline points="{{ spend_pts.s }}" fill="none" stroke="var(--mv-churned,#e8590c)" stroke-width="1.5" stroke-dasharray="4 3" opacity="0.7"/>
+  {# X-axis labels #}
+  {% for d in data %}
+  {% if loop.index0 % tick_every == 0 or loop.last %}
+  {% set x = (loop.index0 / (n - 1) * chart_w + pad_left)|round(1) %}
+  <text x="{{ x }}" y="{{ height - 4 }}" text-anchor="middle"
+        font-size="10" fill="var(--sub,#888)" font-family="var(--mono)">
+    {{ d.date.strftime("%b %-d") if d.date else "" }}
+  </text>
+  {% endif %}
+  {% endfor %}
+</svg>
+<figcaption>
+  <div class="legend" style="margin-top:4px;">
+    <span><i style="background:var(--brand);opacity:0.6;"></i>Revenue</span>
+    <span><i style="background:var(--mv-churned,#e8590c);opacity:0.7;"></i>Ad spend</span>
+  </div>
+</figcaption>
+</figure>
+{% endif %}
+{% endmacro %}
+
+{#- A window picker with optional custom date range support.
+    Submits as ?window=30 (preset) or ?window=custom&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD (custom). -#}
+{% macro window_form(name, current, choices, unit, all_label=none, start_date=none, end_date=none) %}
+<form class="filters range" method="get" data-date-form>
+    <select name="{{ name }}" aria-label="Time range" data-date-select>
         {% if all_label %}<option value="">{{ all_label }}</option>{% endif %}
         {% for value in choices %}
-        <option value="{{ value }}" {% if current == value %}selected{% endif %}>
+        <option value="{{ value }}" {% if current == value and not start_date %}selected{% endif %}>
             Last {{ value }} {{ unit }}</option>
         {% endfor %}
+        <option value="custom" {% if start_date %}selected{% endif %}>Custom range</option>
     </select>
+    <span class="date-inputs" {% if not start_date %}hidden{% endif %}>
+        <input type="date" name="start_date" value="{{ start_date or '' }}" aria-label="Start date">
+        <span style="color:var(--sub);padding:0 2px;">→</span>
+        <input type="date" name="end_date" value="{{ end_date or '' }}" aria-label="End date">
+    </span>
     <button type="submit">Show</button>
 </form>
 {% endmacro %}

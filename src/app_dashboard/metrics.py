@@ -62,6 +62,9 @@ class Metric:
     warn_above: float | None = None
     """For threshold tiles: show warning styling when value rises above this."""
 
+    benchmark: str | None = None
+    """Industry or best-practice benchmark, written in plain English for the info popover."""
+
 
 METRICS: dict[str, Metric] = {
 
@@ -71,84 +74,91 @@ METRICS: dict[str, Metric] = {
         name="Net Revenue",
         slug="revenue",
         unit="currency",
-        definition="Sum of order totals minus refunds for the period. Excludes tax and shipping.",
+        definition="Your total sales minus any refunds, for the selected time period. This is the actual money you collected.",
         rule="sum(total - refunded) from orders where created_at in window",
         data_source="orders",
         pages=("overview",),
         kind="window",
         better="up",
+        benchmark=None,
     ),
 
     "new_customers": Metric(
         name="New Customers",
         slug="new_customers",
         unit="count",
-        definition="Orders where is_new_customer is true, deduplicated by customer. First-time buyers only.",
+        definition="First-time buyers only — people who have never purchased from you before.",
         rule="count(distinct customer_id) from orders where is_new_customer = true and created_at in window",
         data_source="orders",
         pages=("overview",),
         kind="window",
         better="up",
+        benchmark=None,
     ),
 
     "blended_cac": Metric(
-        name="Blended CAC",
+        name="Cost to Acquire a Customer",
         slug="blended_cac",
         unit="currency",
-        definition="Total ad spend divided by new customers acquired in the period. Null when there are zero new customers.",
+        definition="How much you spent on ads to bring in one new customer. Divide total ad spend by new customers. Lower is better.",
         rule="sum(spend) from ad_spend in window / count of new customers in same window. Null when new_customers = 0.",
         data_source="ad_spend, orders",
         pages=("overview",),
         kind="window",
         better="down",
+        benchmark="DTC supplements: $30–$60 is typical. Below $30 is strong.",
     ),
 
     "mer": Metric(
-        name="MER",
+        name="Marketing Efficiency (MER)",
         slug="mer",
         unit="ratio",
-        definition="Marketing efficiency ratio: net revenue divided by total ad spend. Also called blended ROAS (revenue ÷ total ad spend). Null when spend is zero.",
+        definition="How much revenue you earn for every dollar spent on ads. A 3x MER means $3 back for every $1 spent. Higher is better.",
         rule="sum(total - refunded) / sum(spend) across the window. Null when spend = 0.",
         data_source="orders, ad_spend",
         pages=("overview",),
         kind="window",
         better="up",
+        benchmark="Above 3x is healthy. Between 2x–3x is acceptable. Below 2x means ads may not be profitable.",
     ),
 
     "subscription_share": Metric(
-        name="Subscription Share",
+        name="Subscription Conversion",
         slug="subscription_share",
         unit="percent",
-        definition="Percentage of new-customer orders that have a corresponding subscription start.",
+        definition="What percentage of your new customers signed up for a subscription. Higher means more predictable recurring revenue.",
         rule="count of customer_ids in subscription_revenue with converted_at in window / count of new customers in window * 100.",
         data_source="orders, subscription_revenue",
         pages=("overview",),
         kind="window",
         better="up",
+        benchmark="30% or higher is strong for a DTC subscription brand.",
     ),
 
     "aov": Metric(
-        name="AOV",
+        name="Average Order Value",
         slug="aov",
         unit="currency",
-        definition="Average order value (net revenue divided by order count) for the period.",
+        definition="The average dollar amount per order. Higher means customers are buying more per visit.",
         rule="sum(total - refunded) / count(*) from orders where created_at in window.",
         data_source="orders",
         pages=("overview",),
         kind="window",
         better="up",
+        benchmark="Track this alongside discount usage — heavy discounts inflate order count but reduce AOV.",
     ),
 
     "days_of_cover": Metric(
-        name="Days of Cover",
+        name="Inventory Days Remaining",
         slug="days_of_cover",
         unit="days",
-        definition="Units on hand for the serum SKU divided by the 14-day trailing daily unit sales rate. Null until 14 days of sales data exist.",
+        definition="How many days of stock you have left at your current sales rate. Below 60 days is a warning sign — you may run out before new stock arrives.",
         rule="inventory_levels.units_on_hand / (sum of line_item quantities for serum SKU in last 14 days / 14). Null when fewer than 14 days of orders exist.",
         data_source="inventory_levels, orders",
         pages=("overview",),
         kind="point",
         warn_below=60.0,
+        benchmark="Keep at least 60 days of cover as a buffer for shipping delays.",
     ),
 
     # ── Cohort metrics ──────────────────────────────────────────────────────
@@ -180,27 +190,29 @@ METRICS: dict[str, Metric] = {
     # ── Repeat purchase & refund ─────────────────────────────────────────────
 
     "repeat_purchase_rate": Metric(
-        name="Repeat purchase rate",
+        name="Repeat Purchase Rate",
         slug="repeat_purchase_rate",
         unit="percent",
-        definition="% of customers in the window who placed more than one order.",
+        definition="The percentage of customers who came back and bought again. Higher means stronger loyalty and lower dependence on ads.",
         rule="count of customer_ids with order_count > 1 / total customer_ids in window * 100.",
         data_source="orders",
         pages=("overview",),
         kind="window",
         better="up",
+        benchmark="20–30% is typical for DTC. Above 40% is excellent.",
     ),
 
     "refund_rate": Metric(
-        name="Refund rate",
+        name="Refund Rate",
         slug="refund_rate",
         unit="percent",
-        definition="% of orders in the window with any refund amount.",
+        definition="The percentage of orders that were refunded. Lower is healthier — high refunds signal product, quality, or expectation issues.",
         rule="count(*) filter (where refunded > 0) / count(*) from orders where created_at in window * 100.",
         data_source="orders",
         pages=("overview",),
         kind="window",
         better="down",
+        benchmark="Below 3% is healthy. Above 5% warrants investigation.",
     ),
 
     # ── Survey metrics ──────────────────────────────────────────────────────

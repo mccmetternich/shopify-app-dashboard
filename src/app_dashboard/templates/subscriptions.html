@@ -1,8 +1,14 @@
 {% extends "base.html" %}
+{% import "_macros.html" as ui %}
 {% block title %}Subscriptions — {{ DASHBOARD_NAME }}{% endblock %}
+{% block pagehead %}
+<div class="page-head">
+    {{ ui.window_form("window", window, window_choices, "days", start_date=start_date, end_date=end_date) }}
+</div>
+{% endblock %}
 {% block content %}
 <h1>Subscriptions</h1>
-<p class="sub">Active base, churn, retention, LTV, payback, and reactivation — all subscription metrics in one place.</p>
+<p class="sub">Your subscription business at a glance — active subscribers, recent cancellations, and your recurring revenue.</p>
 
 {# ── A: KPI tiles ── #}
 <div class="cards">
@@ -18,11 +24,11 @@
         {% endif %}
     </div>
     <div class="card stat">
-        <div class="label">New subs (last 30d)</div>
+        <div class="label">New subscribers (last {{ window }}d)</div>
         <div class="num">{{ new_subs_30d }}</div>
     </div>
     <div class="card stat">
-        <div class="label">Churned (last 30d)</div>
+        <div class="label">Cancelled (last {{ window }}d)</div>
         <div class="num">{{ churned_count_30d }}</div>
     </div>
     <div class="card stat">
@@ -45,10 +51,36 @@
 {# ── B: MRR waterfall ── #}
 <div class="card" id="mrr-waterfall">
     <h2>MRR waterfall — this month</h2>
-    <p class="sub">Beginning MRR + movements = ending MRR. Verified against live subscriber total — rendered only when event data reconciles.</p>
+    {% if movement_summary %}
+    <div style="font-size:13px;color:var(--sub);margin-bottom:8px;display:flex;flex-wrap:wrap;gap:12px;">
+        {% if movement_summary.new.count > 0 %}
+        <span><span style="color:var(--mv-new);font-weight:600;">{{ movement_summary.new.count }} new</span>
+        <span style="color:var(--mv-new);">+${{ "%.0f"|format(movement_summary.new.mrr) }}/mo</span></span>
+        {% endif %}
+        {% if movement_summary.winback.count > 0 %}
+        <span><span style="color:var(--mv-reactivation);font-weight:600;">{{ movement_summary.winback.count }} win-back</span>
+        <span style="color:var(--mv-reactivation);">+${{ "%.0f"|format(movement_summary.winback.mrr) }}/mo</span></span>
+        {% endif %}
+        {% if movement_summary.expansion.count > 0 %}
+        <span><span style="color:var(--mv-expansion);font-weight:600;">{{ movement_summary.expansion.count }} expansion</span>
+        <span style="color:var(--mv-expansion);">+${{ "%.0f"|format(movement_summary.expansion.mrr) }}/mo</span></span>
+        {% endif %}
+        {% if movement_summary.contraction.count > 0 %}
+        <span><span style="color:var(--mv-contraction);font-weight:600;">{{ movement_summary.contraction.count }} contraction</span>
+        <span style="color:var(--mv-contraction);">−${{ "%.0f"|format(movement_summary.contraction.mrr|abs) }}/mo</span></span>
+        {% endif %}
+        {% if movement_summary.churn.count > 0 %}
+        <span><span style="color:var(--mv-churned);font-weight:600;">{{ movement_summary.churn.count }} cancelled</span>
+        <span style="color:var(--mv-churned);">−${{ "%.0f"|format(movement_summary.churn.mrr|abs) }}/mo</span></span>
+        {% endif %}
+    </div>
+    {% endif %}
+    <p class="sub">How your monthly recurring revenue changed this month. Each row adds or subtracts from your starting MRR — the final row is where you ended up.</p>
     {% if waterfall is none %}
+    {# State 1: no event data at all #}
     <div class="empty-state"><p class="sub">No subscription event data yet.</p></div>
-    {% elif not waterfall.reconciled %}
+    {% elif waterfall.checked and not waterfall.reconciled %}
+    {# State 2: check ran and found a gap — show the gap, not the table #}
     <div class="empty-state">
         <p class="sub">
             Event data out of sync — event-derived ending MRR
@@ -59,9 +91,12 @@
             understates measured MRR by ${{ "%.0f"|format(waterfall.reconcile_delta|abs) }}
             (missing expansion events).
             {% endif %}
+            Event-derived: ${{ "%.0f"|format(waterfall.ending_mrr) }}
+            — Measured: ${{ "%.0f"|format(waterfall.ending_mrr_actual) }}.
         </p>
     </div>
     {% else %}
+    {# State 3a (checked + reconciled) or 3b (unchecked — no snapshot for this period) #}
     <div class="legend">
         <span><i style="background: var(--mv-new)"></i>New</span>
         <span><i style="background: var(--mv-reactivation)"></i>Reactivation</span>
@@ -97,7 +132,7 @@
             </tr>
             <tr>
                 <td style="color: var(--mv-churned);">− Churned (involuntary)</td>
-                <td class="num">${{ "%.0f"|format(waterfall.churned_mrr_involuntary) }}</td>
+                <td class="num sub" style="font-weight:normal;">No dunning source</td>
             </tr>
             <tr style="font-weight: 600; border-top: 2px solid var(--border);">
                 <td>Ending MRR</td>
@@ -105,9 +140,13 @@
             </tr>
         </tbody>
     </table>
-    {% if waterfall.ending_mrr_actual is not none %}
+    {% if waterfall.checked %}
     <p class="sub" style="margin-top:6px;text-align:right;">
         Verified: ${{ "%.0f"|format(waterfall.ending_mrr_actual) }} measured from live subscribers
+    </p>
+    {% else %}
+    <p class="sub" style="margin-top:6px;text-align:right;color:var(--text-muted,#888);">
+        No snapshot available for this period — reconciliation check did not run.
     </p>
     {% endif %}
     {% endif %}
@@ -115,45 +154,88 @@
 
 {# ── C: Churn metrics ── #}
 <div class="card" id="churn">
-    <h2>Churn — last full month</h2>
-    <p class="sub">Logo churn = % of subscribers who cancelled. Revenue churn = % of MRR that churned. Involuntary = payment failure ≥14 days in dunning.</p>
+    <h2>Cancellations &amp; Failed Payments</h2>
+    <p class="sub">Logo churn = what percentage of your subscribers cancelled. Revenue churn = what percentage of your recurring revenue was lost. Both below 5% monthly is healthy.</p>
     <div class="cards" style="gap:12px;margin-top:12px;">
         <div class="card stat{% if churn.voluntary_rate is not none and churn.voluntary_rate > 0.05 %} down{% endif %}">
-            <div class="label">Logo churn — voluntary</div>
+            <div class="label">Voluntary cancellations</div>
             <div class="num">
                 {% if churn.voluntary_rate is not none %}{{ "%.1f"|format(churn.voluntary_rate * 100) }}%{% else %}—{% endif %}
             </div>
         </div>
-        <div class="card stat{% if churn.involuntary_rate is not none and churn.involuntary_rate > 0.02 %} down{% endif %}">
-            <div class="label">Logo churn — involuntary</div>
-            <div class="num">
-                {% if churn.involuntary_rate is not none %}{{ "%.1f"|format(churn.involuntary_rate * 100) }}%{% else %}—{% endif %}
-            </div>
+        <div class="card stat">
+            <div class="label">Failed payments</div>
+            <div class="num sub" style="font-size:13px;font-weight:normal;padding-top:4px;">No dunning source</div>
         </div>
         <div class="card stat">
-            <div class="label">Logo churn — total</div>
+            <div class="label">Total cancellations</div>
             <div class="num">
                 {% if churn.total_rate is not none %}{{ "%.1f"|format(churn.total_rate * 100) }}%{% else %}—{% endif %}
             </div>
         </div>
         <div class="card stat">
-            <div class="label">Revenue churn — voluntary</div>
+            <div class="label">MRR lost to cancellations</div>
             <div class="num">
                 {% if rev_churn.voluntary is not none %}{{ "%.1f"|format(rev_churn.voluntary * 100) }}%{% else %}—{% endif %}
             </div>
         </div>
         <div class="card stat">
-            <div class="label">Revenue churn — involuntary</div>
-            <div class="num">
-                {% if rev_churn.involuntary is not none %}{{ "%.1f"|format(rev_churn.involuntary * 100) }}%{% else %}—{% endif %}
-            </div>
+            <div class="label">MRR lost to failed payments</div>
+            <div class="num sub" style="font-size:13px;font-weight:normal;padding-top:4px;">No dunning source</div>
         </div>
     </div>
 </div>
 
+{# ── C2: Churn event detail ── #}
+{% if recent_churn_events %}
+<div class="card">
+    <h2>Churn events</h2>
+    <p class="sub">Recent cancellations. Mechanism column shows how the churn was detected — blank means an exact cancellation timestamp from the API; "billing-gap" means inferred from a payment gap, not a confirmed cancellation.</p>
+    <div class="table-card" style="margin-top:10px;">
+        <table>
+            <thead>
+                <tr>
+                    <th>Subscription</th>
+                    <th class="num">Date</th>
+                    <th class="num">MRR lost</th>
+                    <th>Bucket</th>
+                    <th>Mechanism</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for ev in recent_churn_events %}
+                <tr>
+                    <td style="font-family:var(--mono);font-size:12px;">{{ ev.subscription_id }}</td>
+                    <td class="num" style="font-size:12px;">{{ ev.event_date }}</td>
+                    <td class="num">${{ "%.0f"|format(ev.mrr_delta|abs) }}</td>
+                    <td>
+                        {% if ev.churn_type == 'voluntary' %}
+                        <span class="sub">voluntary</span>
+                        {% elif ev.churn_type == 'involuntary' %}
+                        <span class="sub">involuntary</span>
+                        {% else %}
+                        <span class="sub">—</span>
+                        {% endif %}
+                    </td>
+                    <td style="font-size:12px;color:{% if ev.approximation_reason %}var(--text-muted,#888){% else %}inherit{% endif %};">
+                        {% if ev.approximation_reason %}
+                        {{ ev.approximation_reason }}
+                        {% else %}
+                        exact (API cancellation timestamp)
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endif %}
+
 {# ── D: Pause ── #}
 <div class="card">
     <h2>Pause behaviour</h2>
+    <p class="sub">Subscribers who paused instead of cancelling. A pause is much better than a churn — most come back.</p>
     <div class="cards" style="gap:12px;margin-top:12px;">
         <div class="card stat">
             <div class="label">Pause rate — last month</div>
@@ -185,7 +267,7 @@
 {# ── E: Cohort retention grid ── #}
 <div class="card" id="retention">
     <h2>Subscription retention by cohort</h2>
-    <p class="sub">Each row is a subscription cohort month. Cells show % of that cohort still subscribed at M1/M3/M6/M12. Shaded = strong retention.</p>
+    <p class="sub">What percentage of subscribers from each starting month are still subscribed. Higher and greener is better. The benchmarks: 85%+ at month 1, 70%+ at month 3, 55%+ at month 6.</p>
     {% if retention %}
     <div class="table-card" style="margin-top:10px;">
         <table>
@@ -229,12 +311,12 @@
 {# ── F: Churn benchmark context ── #}
 <div class="card">
     <h2>Churn benchmark context</h2>
-    <p class="sub">DTC supplement subscriptions: good monthly logo churn ≤5%, involuntary ≤2%. Revenue churn mirrors logo churn for flat-price plans.</p>
+    <p class="sub">How your cancellation rates compare to DTC supplement industry benchmarks.</p>
     <table class="data-table">
         <thead><tr><th>Metric</th><th class="num">Target</th><th class="num">Actual (last month)</th><th>Status</th></tr></thead>
         <tbody>
             <tr>
-                <td>Logo churn — voluntary</td>
+                <td>Voluntary cancellations</td>
                 <td class="num">≤5%</td>
                 <td class="num">{% if churn.voluntary_rate is not none %}{{ "%.1f"|format(churn.voluntary_rate * 100) }}%{% else %}—{% endif %}</td>
                 <td>
@@ -245,15 +327,10 @@
                 </td>
             </tr>
             <tr>
-                <td>Logo churn — involuntary</td>
+                <td>Failed payments</td>
                 <td class="num">≤2%</td>
-                <td class="num">{% if churn.involuntary_rate is not none %}{{ "%.1f"|format(churn.involuntary_rate * 100) }}%{% else %}—{% endif %}</td>
-                <td>
-                    {% if churn.involuntary_rate is none %}<span class="sub">No data</span>
-                    {% elif churn.involuntary_rate <= 0.02 %}<span class="pill installed">On target</span>
-                    {% else %}<span class="pill" style="background:rgba(232,89,12,.1);color:var(--down);">Above target</span>
-                    {% endif %}
-                </td>
+                <td class="num sub">—</td>
+                <td><span class="sub">No dunning source — will populate when dunning webhooks are wired</span></td>
             </tr>
         </tbody>
     </table>
@@ -262,7 +339,7 @@
 {# ── G: LTV tiles ── #}
 <div class="card" id="ltv">
     <h2>12-month LTV by cohort</h2>
-    <p class="sub">Gross profit per cohort member over first 12 months. Requires cost_inputs and 12+ months of order history. Theoretical LTV = avg monthly GP / monthly churn rate.</p>
+    <p class="sub">How much gross profit each subscriber generates in their first 12 months, after product costs, shipping, and payment fees. Requires cost settings to be configured.</p>
     {% if ltv_12m %}
     <div class="table-card" style="margin-top:10px;">
         <table>
@@ -304,7 +381,7 @@
 {# ── H: Payback timing ── #}
 <div class="card" id="payback">
     <h2>CAC payback by cohort</h2>
-    <p class="sub">Blended CAC = ad spend in cohort month / new customers that month. Payback month = first month where cumulative GP per customer ≥ CAC.</p>
+    <p class="sub">How quickly the profit from a subscriber covers what you spent to acquire them. M1 means they paid back immediately. M3 or earlier is a healthy DTC business.</p>
     {% if payback %}
     <div class="table-card" style="margin-top:10px;">
         <table>
@@ -346,7 +423,8 @@
 
 {# ── I: Reactivation ── #}
 <div class="card" id="reactivation">
-    <h2>Reactivation (win-backs)</h2>
+    <h2>Win-backs</h2>
+    <p class="sub">Customers who cancelled and then came back. Win-backs cost much less to reacquire than brand new customers.</p>
     <div class="cards" style="gap:12px;margin-top:10px;">
         {% if reactivation %}
         <div class="card stat">

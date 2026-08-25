@@ -2,9 +2,9 @@
 {% import "_macros.html" as ui %}
 {% block content %}
 <h1>Meta Ads</h1>
-<p class="sub">All numbers from Meta's attribution model. <sup>~</sup> = estimated, not a Shopify hard count. Hard counts: spend, impressions, clicks.</p>
+<p class="sub">Your Meta ad performance broken down by campaign and ad. Spend, impressions, and clicks are exact. Purchase counts and ROAS are Meta's estimates — they almost always look better than reality. The MER on Overview is the more honest measure.</p>
 
-{{ ui.window_form("window", window, window_choices, "days") }}
+{{ ui.window_form("window", window, window_choices, "days", start_date=start_date, end_date=end_date) }}
 
 <div class="card">
     <h2>Channel vitals</h2>
@@ -18,7 +18,7 @@
         <div class="card stat"><div class="label">Purchases <sup title="As reported by Meta — estimated">~</sup></div><div class="num">{{ meta.purchases }}</div></div>
         <div class="card stat"><div class="label">ROAS <sup title="As reported by Meta — estimated. Compare to blended MER on Overview.">~</sup></div><div class="num">{% if meta.roas %}{{ meta.roas }}x{% else %}—{% endif %}</div></div>
     </div>
-    <p class="sub" style="margin-top:8px;"><sup>~</sup> Meta purchases and ROAS are as reported by Meta's attribution model — estimated, not Shopify hard counts. The blended MER on Overview is the ground truth for total ad efficiency.</p>
+    <p class="sub" style="margin-top:8px;">Meta's purchase count and ROAS are estimates from their attribution model — they'll usually look better than reality. The MER on Overview is a more honest measure of total ad efficiency.</p>
 </div>
 
 {% if campaigns %}
@@ -44,7 +44,7 @@
 {% if top_ads %}
 <div class="card">
     <h2>Top ads by spend</h2>
-    <p class="sub">Names and spend only — creative work stays in Meta Ads Manager.</p>
+    <p class="sub">Your top-spending ads. Click "Open in Meta" to see the full creative and make changes in Ads Manager.</p>
     <table class="data-table">
         <thead><tr><th>Ad</th><th class="num">Spend</th><th class="num">CTR</th><th class="num">Purchases <sup>~</sup></th><th class="num">ROAS <sup>~</sup></th><th></th></tr></thead>
         <tbody>
@@ -69,7 +69,7 @@
 {% if not meta.has_data and not campaigns and not top_ads %}
 <div class="card">
     <div class="empty-state">
-        <p class="sub">No Meta data yet. Wire <code>META_ACCESS_TOKEN</code> and <code>META_ACCOUNT_ID</code> to start the ads feed, or run <code>seed_demo.py</code> to populate with synthetic data.</p>
+        <p class="sub">No Meta Ads data yet. Connect your Meta account to see ad spend and performance.</p>
     </div>
 </div>
 {% endif %}

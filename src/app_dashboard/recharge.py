@@ -73,23 +73,23 @@ class RechargeClient:
         self,
         updated_at_min: datetime,
         cursor: str | None = None,
-    ) -> tuple[list[dict], str | None]:
+    ) -> tuple[list[dict], str | None, int]:
         """Fetch one page of successful, non-test charges updated since `updated_at_min`.
 
-        Returns (charges, next_cursor). next_cursor is None when there are no
-        more pages. Caller loops until next_cursor is None.
+        Returns (charges, next_cursor, skipped_non_usd).
+          - charges: list of parsed charge dicts (USD only)
+          - next_cursor: None when there are no more pages
+          - skipped_non_usd: count of charges dropped due to non-USD currency
+
+        The caller accumulates skipped_non_usd across pages and writes it to
+        sync_state so it surfaces on the quality page.
 
         Filtering applied here:
           1. status=SUCCESS — only billed charges, not pending/failed/refunded
           2. charge['test'] == False — EXPLICIT test-charge filter (C1 trap:
              never rely on external_transaction_id prefix alone)
-          3. external_transaction_id that starts with 'ch_' is a real Stripe
-             charge — we log a warning if we see a test charge slip through
-             (belt-and-suspenders) but the test==False check is the authoritative gate
-
-        Currency assertion: raises immediately if charge['currency'] != 'USD'.
-        Do not silently skip or convert — a foreign-currency charge that gets
-        stored as USD corrupts revenue totals.
+          3. Non-USD charges are skipped and counted, not raised. Raising would
+             stall the entire pipeline permanently on one foreign-currency row.
         """
         params: dict = {
             "status": "SUCCESS",
@@ -119,6 +119,7 @@ class RechargeClient:
         next_cursor = body.get("next_cursor") or None
 
         charges = []
+        skipped_non_usd = 0
         for charge in raw_charges:
             # EXPLICIT test-charge filter (C1 trap).
             is_test = charge.get("test", False)
@@ -139,13 +140,19 @@ class RechargeClient:
                     ext_id,
                 )
 
-            # Currency assertion — never silently convert (C1 trap).
+            # Currency guard — non-USD charges are skipped and counted, not raised.
+            # Count is returned to the caller and written to sync_state so the
+            # quality page surfaces it. A warning in logs alone is invisible.
             currency = charge.get("currency", "")
-            assert currency == "USD", (
-                f"Recharge charge {charge.get('id')} has currency={currency!r}, "
-                "expected USD. Configure Recharge to USD or update the ingest "
-                "layer to handle multiple currencies explicitly."
-            )
+            if currency != "USD":
+                logger.warning(
+                    "fetch_charges: skipping charge %s — currency=%r (not USD). "
+                    "Excluded from subscription_revenue and MRR totals. "
+                    "Count written to sync_state; visible on quality page.",
+                    charge.get("id"), currency,
+                )
+                skipped_non_usd += 1
+                continue
 
             charges.append({
                 "id": str(charge["id"]),
@@ -158,12 +165,13 @@ class RechargeClient:
             })
 
         logger.debug(
-            "fetch_charges: %d charges (of %d raw), next_cursor=%r",
+            "fetch_charges: %d charges (of %d raw), skipped_non_usd=%d, next_cursor=%r",
             len(charges),
             len(raw_charges),
+            skipped_non_usd,
             next_cursor,
         )
-        return charges, next_cursor
+        return charges, next_cursor, skipped_non_usd
 
     def fetch_subscriptions(
         self,

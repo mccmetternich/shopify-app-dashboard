@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Data Quality — {{ DASHBOARD_NAME }}{% endblock %}
+{% block title %}Data Health — {{ DASHBOARD_NAME }}{% endblock %}
 {% block content %}
-<h1>Data Quality</h1>
-<p class="sub">Order integrity, orphaned records, and sync freshness per source. A clean data layer is the foundation every metric depends on.</p>
+<h1>Data Health</h1>
+<p class="sub">A clean data foundation is what every metric depends on. Green across the board means your numbers are trustworthy.</p>
 
 {# ── A: Order integrity tiles ── #}
 <div class="card">
@@ -75,6 +75,7 @@
                     <th>Last synced</th>
                     <th>Age</th>
                     <th>Status</th>
+                    <th>Skipped</th>
                     <th>Last error</th>
                 </tr>
             </thead>
@@ -105,6 +106,17 @@
                         <span class="pill" style="background:rgba(245,158,11,.1);color:#b45309;">Warning (&gt;4h)</span>
                         {% else %}
                         <span class="pill installed">Fresh</span>
+                        {% endif %}
+                    </td>
+                    <td style="font-family:var(--mono);font-size:13px;">
+                        {% if row.non_usd_skipped is none %}
+                        <span class="sub">—</span>
+                        {% elif row.non_usd_skipped > 0 %}
+                        <span style="color:var(--down);" title="Non-USD charges excluded from MRR and revenue totals">
+                            {{ row.non_usd_skipped }} non-USD
+                        </span>
+                        {% else %}
+                        <span style="color:var(--ok);">0</span>
                         {% endif %}
                     </td>
                     <td style="font-family:var(--mono);font-size:11px;color:var(--sub);max-width:280px;word-break:break-word;">

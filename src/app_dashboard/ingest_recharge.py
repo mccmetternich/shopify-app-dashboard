@@ -157,9 +157,14 @@ def _mark_churned(conn: psycopg.Connection) -> int:
 
     Identifies active subs (churned_at IS NULL) whose converted_at is older than
     the cutoff and that have no existing 'churn' event. For each:
-      - Sets churned_at, status='churned', churn_type='involuntary'
-      - Emits one 'churn' event to subscription_events with approximation_reason
-        explaining this is a billing-gap inference, not a confirmed cancellation
+      - Sets churned_at, status='churned', churn_type='voluntary'
+      - Emits one 'churn' event with approximation_reason explaining the inference
+
+    churn_type='voluntary' because billing-gap inference carries no payment-failure
+    evidence. The voluntary bucket is visible to operators; the approximation_reason
+    records the mechanism. When Phase D webhooks arrive, real involuntary churns
+    will have dunning_started_at set and will sort into the involuntary bucket.
+    Billing-gap rows can be reclassified then if the evidence supports it.
 
     approximation_reason = 'billing-gap: no charge in 45+ days'
     Phase D (webhooks) will replace this with an exact cancellation timestamp.
@@ -192,7 +197,7 @@ def _mark_churned(conn: psycopg.Connection) -> int:
     conn.execute(
         """
         update subscription_revenue
-        set churned_at = %s, status = 'churned', churn_type = 'involuntary'
+        set churned_at = %s, status = 'churned', churn_type = 'voluntary'
         where id = any(%s) and churned_at is null
         """,
         (cutoff, sub_ids),
@@ -203,6 +208,8 @@ def _mark_churned(conn: psycopg.Connection) -> int:
         insert into subscription_events
             (subscription_id, customer_id, event_type, event_date, mrr_delta, approximation_reason)
         values (%s, %s, 'churn', %s, %s, %s)
+        on conflict (subscription_id, event_type, event_date) where source_id is null
+        do nothing
         """,
         [
             (sub_id, customer_id, event_date, -monthly_amount, reason)
@@ -222,9 +229,13 @@ def _load_sync_state(conn: psycopg.Connection) -> dict:
     return {}
 
 
-def _update_sync_state(conn: psycopg.Connection, cursor: str | None) -> None:
+def _update_sync_state(
+    conn: psycopg.Connection,
+    cursor: str | None,
+    non_usd_skipped: int = 0,
+) -> None:
     from psycopg.types.json import Jsonb
-    meta: dict = {}
+    meta: dict = {"non_usd_skipped": non_usd_skipped}
     if cursor:
         meta["recharge_cursor"] = cursor
     conn.execute(
@@ -251,8 +262,8 @@ def sync_subscription_revenue(
 
     Returns count of rows inserted or updated.
 
-    CRITICAL: currency must be USD — raised in RechargeClient and re-asserted
-    here. Never silently convert.
+    Non-USD charges are skipped and counted in sync_state.meta.non_usd_skipped;
+    they do not raise or stall the pipeline. The count surfaces on the quality page.
 
     CRITICAL: test charges are filtered in RechargeClient.fetch_charges().
     """
@@ -270,6 +281,7 @@ def sync_subscription_revenue(
         updated_at_min = datetime.now(timezone.utc) - timedelta(days=90)
 
     total_upserted = 0
+    total_skipped_non_usd = 0
 
     logger.info(
         "sync_subscription_revenue: starting from cursor=%r updated_at_min=%s",
@@ -278,12 +290,13 @@ def sync_subscription_revenue(
     )
 
     while True:
-        charges, next_cursor = client.fetch_charges(
+        charges, next_cursor, skipped_non_usd = client.fetch_charges(
             updated_at_min=updated_at_min,
             cursor=cursor,
         )
+        total_skipped_non_usd += skipped_non_usd
 
-        if not charges:
+        if not charges and not skipped_non_usd:
             break
 
         with conn.transaction():
@@ -293,17 +306,26 @@ def sync_subscription_revenue(
                 total_upserted += upserted
                 _emit_mrr_recognized(conn, charge)
 
-            _update_sync_state(conn, next_cursor)
+            _update_sync_state(conn, next_cursor, non_usd_skipped=total_skipped_non_usd)
 
         logger.info(
-            "sync_subscription_revenue: page done, %d charges processed, next_cursor=%r",
+            "sync_subscription_revenue: page done, %d charges processed, "
+            "%d non-USD skipped, next_cursor=%r",
             len(charges),
+            skipped_non_usd,
             next_cursor,
         )
 
         if next_cursor is None:
             break
         cursor = next_cursor
+
+    if total_skipped_non_usd:
+        logger.warning(
+            "sync_subscription_revenue: %d non-USD charges skipped across all pages — "
+            "visible on quality page under recharge_charges",
+            total_skipped_non_usd,
+        )
 
     # Run churn detection after all new charges are ingested.
     churned = _mark_churned(conn)
@@ -354,7 +376,8 @@ def _backfill_new_events(conn: psycopg.Connection) -> int:
 
     Uses subscription_revenue.converted_at as event_date — this is set from the
     first charge's scheduled_at, which is an exact date.
-    Idempotent: the WHERE NOT EXISTS guard prevents duplicates.
+    Idempotent: WHERE NOT EXISTS guard + ON CONFLICT on ix_sub_events_natural_key
+    (subscription_id, event_type, event_date) WHERE source_id IS NULL.
     """
     result = conn.execute(
         """
@@ -373,6 +396,8 @@ def _backfill_new_events(conn: psycopg.Connection) -> int:
             where se.subscription_id = sr.id
               and se.event_type = 'new'
         )
+        on conflict (subscription_id, event_type, event_date) where source_id is null
+        do nothing
         """
     )
     return result.rowcount
@@ -413,6 +438,8 @@ def _backfill_churn_events(conn: psycopg.Connection) -> int:
               select 1 from subscription_events se
               where se.subscription_id = sr.id and se.event_type = 'churn'
           )
+        on conflict (subscription_id, event_type, event_date) where source_id is null
+        do nothing
         """
     )
     return result.rowcount
@@ -453,9 +480,44 @@ def _backfill_winback_events(conn: psycopg.Connection) -> int:
               where se_wb.subscription_id = se_new.subscription_id
                 and se_wb.event_type = 'winback'
           )
+        on conflict (subscription_id, event_type, event_date) where source_id is null
+        do nothing
         """
     )
     return result.rowcount
+
+
+def ensure_event_backfill(conn: psycopg.Connection) -> int:
+    """Run the three DB-only backfill steps without a Recharge API token.
+
+    Covers:
+      - 'new' events for subscriptions that have no 'new' event yet
+      - 'churn' events for subscription_revenue rows with churned_at but no event
+      - 'winback' reclassification of 'new' events for returning customers
+
+    Safe to call unconditionally on every snapshot run. Idempotent — each step
+    has a WHERE NOT EXISTS guard. Does not advance the sub_event watermark (that
+    is the API poll's responsibility).
+
+    Returns total events written across all three steps.
+    """
+    new_emitted = _backfill_new_events(conn)
+    if new_emitted:
+        logger.info("ensure_event_backfill: emitted %d 'new' events", new_emitted)
+
+    churn_emitted = _backfill_churn_events(conn)
+    if churn_emitted:
+        logger.info("ensure_event_backfill: emitted %d 'churn' events", churn_emitted)
+
+    winback_emitted = _backfill_winback_events(conn)
+    if winback_emitted:
+        logger.info("ensure_event_backfill: emitted %d 'winback' events", winback_emitted)
+
+    total = new_emitted + churn_emitted + winback_emitted
+    if total:
+        conn.commit()
+        logger.info("ensure_event_backfill: committed %d events total", total)
+    return total
 
 
 def sync_subscription_events(
@@ -616,6 +678,17 @@ def sync_subscription_events(
 
     # Step 4: advance watermark so next run fetches only recent changes.
     _save_sub_event_watermark(conn, now_ts)
+
+    # Step 5: prune subscription_state_log rows older than 7 days.
+    # The log's only consumer is the Phase-2 differ. 7 days covers any differ
+    # failure window. After that the rows have no further use regardless of
+    # whether the differ has been built.
+    pruned = conn.execute(
+        "delete from subscription_state_log where polled_at < now() - interval '7 days'"
+    ).rowcount
+    if pruned:
+        logger.info("sync_subscription_events: pruned %d state_log rows older than 7 days", pruned)
+
     conn.commit()
 
     total = new_emitted + churn_emitted + winback_emitted

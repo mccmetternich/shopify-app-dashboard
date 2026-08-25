@@ -2,15 +2,12 @@
 {% block title %}Upsell — {{ DASHBOARD_NAME }}{% endblock %}
 {% block content %}
 <h1>Upsell &amp; Revenue Mix</h1>
-<p class="sub">Three revenue streams, post-purchase upsell take rates, and LTV uplift from capsules adoption.</p>
+<p class="sub">How much of your revenue comes from new buyers versus returning subscribers versus non-sub repeats — and how your post-purchase upsells are converting.</p>
 
 {# ── A: Three revenue streams ── #}
 <div class="card">
     <h2 id="revenue-streams">Three revenue streams</h2>
-    <p class="sub">
-        New customer revenue = first-time buyer orders. Subscription recurring = rebills from existing subscribers.
-        Non-sub repeat = returning buyers who are not on a subscription. Mutually exclusive, last {{ window }} days.
-    </p>
+    <p class="sub">Where your revenue comes from — split between new buyers, existing subscribers, and returning customers who aren't on a subscription. Mutually exclusive, last {{ window }} days.</p>
     {% if three_streams.total is not none %}
     {% set total = three_streams.total %}
     <div class="cards" style="gap:12px;margin-top:12px;">
@@ -71,7 +68,7 @@
 {# ── B: Upsell take rates ── #}
 <div class="card">
     <h2 id="upsell-take-rates">Post-purchase upsell take rates</h2>
-    <p class="sub">Take rate = accepted upsell events / total orders in the window. Zero take rate means the upsell was offered but none accepted.</p>
+    <p class="sub">What percentage of customers accepted each post-purchase offer. Zero means the offer was shown but nobody took it — worth testing copy or timing.</p>
     {% set upsell_labels = {
         "priority_shipping": "Priority shipping",
         "upsell_t1": "Upsell T1",
@@ -103,25 +100,29 @@
 {# ── C: Serum vs serum+capsules LTV ── #}
 <div class="card">
     <h2 id="serum-ltv">Serum-only vs serum + capsules — 12m LTV</h2>
-    <p class="sub">Customers who also buy capsules on subscription vs those who buy serum only. LTV = cumulative GP over first 12 months per customer. Cohorts with &lt;12 months of history are excluded.</p>
-    {% if serum_ltv %}
+    <p class="sub">Customers who also subscribe to capsules generate meaningfully more gross profit over their first year. This is the business case for cross-selling capsules at every touchpoint.</p>
+    {% if serum_ltv and serum_ltv.serum_only.ltv is not none %}
     <div class="cards" style="gap:12px;margin-top:12px;">
         <div class="card stat">
             <div class="label">Serum only</div>
             <div class="num">
-                {% if serum_ltv.serum_only is not none %}${{ "%.0f"|format(serum_ltv.serum_only) }}{% else %}—{% endif %}
+                ${{ "%.0f"|format(serum_ltv.serum_only.ltv) }}
             </div>
+            <div class="delta"><span class="delta-num">{{ serum_ltv.serum_only.count }}</span> customers</div>
         </div>
-        <div class="card stat{% if serum_ltv.serum_capsules is not none and serum_ltv.serum_only is not none and serum_ltv.serum_capsules > serum_ltv.serum_only %} up{% endif %}">
+        <div class="card stat{% if serum_ltv.serum_capsules.ltv is not none and serum_ltv.serum_capsules.ltv > serum_ltv.serum_only.ltv %} up{% endif %}">
             <div class="label">Serum + capsules</div>
             <div class="num">
-                {% if serum_ltv.serum_capsules is not none %}${{ "%.0f"|format(serum_ltv.serum_capsules) }}{% else %}—{% endif %}
+                {% if serum_ltv.serum_capsules.ltv is not none %}${{ "%.0f"|format(serum_ltv.serum_capsules.ltv) }}{% else %}—{% endif %}
             </div>
+            {% if serum_ltv.serum_capsules.count %}
+            <div class="delta"><span class="delta-num">{{ serum_ltv.serum_capsules.count }}</span> customers</div>
+            {% endif %}
         </div>
-        {% if serum_ltv.serum_capsules is not none and serum_ltv.serum_only is not none and serum_ltv.serum_only > 0 %}
-        <div class="card stat">
+        {% if serum_ltv.delta_pct is not none %}
+        <div class="card stat up">
             <div class="label">LTV uplift</div>
-            <div class="num">+{{ "%.0f"|format(100 * (serum_ltv.serum_capsules - serum_ltv.serum_only) / serum_ltv.serum_only) }}%</div>
+            <div class="num">+{{ "%.0f"|format(serum_ltv.delta_pct) }}%</div>
             <div class="delta">from adding capsules</div>
         </div>
         {% endif %}

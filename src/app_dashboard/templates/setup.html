@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Setup Checklist — {{ DASHBOARD_NAME }}{% endblock %}
+{% block content %}
+<h1>Setup Checklist</h1>
+<p class="sub">Track which integrations are connected and what still needs to be configured before your metrics are fully reliable.</p>
+
+{# ── Progress bar ── #}
+<div style="margin-bottom:20px;">
+    <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+        <span class="sub">{{ checklist.done_count }} of {{ checklist.total_count }} steps complete</span>
+        {% if checklist.done_count == checklist.total_count %}
+        <span style="color:var(--ok);font-size:13px;">All systems ready</span>
+        {% endif %}
+    </div>
+    <div class="bar-track" style="height:8px;">
+        <div class="bar" style="width:{{ (100 * checklist.done_count / checklist.total_count)|round|int }}%;height:8px;background:var(--ok);"></div>
+    </div>
+</div>
+
+{# ── Groups ── #}
+{% for group in checklist.groups %}
+<div class="card">
+    <h2>{{ group.title }}</h2>
+    <div style="margin-top:12px;display:flex;flex-direction:column;gap:14px;">
+        {% for item in group.items %}
+        <div style="display:flex;gap:12px;align-items:flex-start;">
+            <div style="flex-shrink:0;width:20px;text-align:center;">
+                {% if item.status == 'done' %}<span style="color:var(--ok);font-size:16px;">✓</span>
+                {% elif item.status == 'warning' %}<span style="color:#f59e0b;font-size:16px;">⚠</span>
+                {% else %}<span style="color:var(--sub);font-size:16px;">○</span>{% endif %}
+            </div>
+            <div style="flex:1;">
+                <div style="font-weight:600;font-size:14px;margin-bottom:2px;">{{ item.label }}</div>
+                <div class="sub" style="font-size:13px;">{{ item.detail }}</div>
+                {% if item.action %}
+                <div style="margin-top:4px;font-size:12px;color:var(--sub);">
+                    {% if item.action_url %}
+                    → <a href="{{ item.action_url }}" style="color:var(--brand);">{{ item.action }}</a>
+                    {% else %}
+                    → {{ item.action }}
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+            <div style="flex-shrink:0;">
+                {% if item.status == 'done' %}
+                <span class="pill installed">Done</span>
+                {% elif item.status == 'warning' %}
+                <span class="pill" style="background:rgba(245,158,11,.1);color:#b45309;">Needs attention</span>
+                {% else %}
+                <span class="pill uninstalled">Pending</span>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endfor %}
+{% endblock %}

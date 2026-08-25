@@ -51,11 +51,14 @@ from app_dashboard.scheduler import start_scheduler
 from app_dashboard.security import RateLimiter, SecurityHeadersMiddleware, client_key
 from app_dashboard.stats import (
     active_subscribers,
+    all_prior_stats,
     cohort_ltv_12m,
     collected_revenue,
     customer_cohorts,
+    daily_revenue_and_spend,
     data_quality_stats,
     days_of_cover,
+    gross_profit_summary,
     logo_churn_involuntary,
     logo_churn_voluntary,
     monthly_activity,
@@ -76,6 +79,7 @@ from app_dashboard.stats import (
     rev_churn_voluntary,
     revenue_by_month,
     serum_vs_capsules_ltv,
+    subscription_movement_summary,
     subscription_mrr_recognized_and_cash,
     subscription_retention,
     subscription_retention_by_offset,
@@ -90,6 +94,7 @@ from app_dashboard.stats import (
     repeat_purchase_rate,
     refund_rate,
     omnisend_summary,
+    omnisend_flow_vs_campaign_split,
     generate_summary,
     kpi_sparklines,
     meta_channel_vitals,
@@ -98,6 +103,7 @@ from app_dashboard.stats import (
     theoretical_ltv,
     three_revenue_streams,
     upsell_stats,
+    setup_checklist,
 )
 from app_dashboard.usage import (
     MAX_BODY_BYTES,
@@ -120,6 +126,32 @@ security = HTTPBasic(auto_error=False)
 
 # Valid window sizes for the overview time-range picker.
 WINDOW_CHOICES = [7, 30, 90]
+
+
+def _resolve_window(
+    window: int,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> tuple[int, str | None, str | None]:
+    """Resolve window query params to (window_days, start_date, end_date).
+
+    If start_date + end_date are provided and valid, compute window_days from
+    the date delta. Otherwise fall through to the preset window validation.
+    Returns (window_days, start_date_str, end_date_str).
+    """
+    from datetime import date as _date
+    if start_date and end_date:
+        try:
+            sd = _date.fromisoformat(start_date)
+            ed = _date.fromisoformat(end_date)
+            if ed > sd:
+                days = (ed - sd).days
+                return days, start_date, end_date
+        except (ValueError, TypeError):
+            pass
+    # Preset path
+    validated = window if window in WINDOW_CHOICES else 7
+    return validated, None, None
 
 
 def _same_secret(supplied: str | None, expected: str | None) -> bool:
@@ -376,8 +408,9 @@ def create_app(conn_factory) -> FastAPI:
     # ── Overview (/): Phase C rewrite ─────────────────────────────────────────
     @app.get("/")
     def overview(request: Request, window: int = 7,
+                 start_date: str | None = None, end_date: str | None = None,
                  user: str = Depends(verify_creds)):
-        window = window if window in WINDOW_CHOICES else 7
+        window, start_date, end_date = _resolve_window(window, start_date, end_date)
         conn = conn_factory()
         try:
             stats = overview_stats(conn, window_days=window)
@@ -480,10 +513,30 @@ def create_app(conn_factory) -> FastAPI:
             sku_revenue = revenue_by_sku(conn, window)
             repeat_rate = repeat_purchase_rate(conn, window)
             refunds = refund_rate(conn, window)
+            prior_secondary = all_prior_stats(conn, window)
+            repeat_compare = None
+            if repeat_rate.get("rate") is not None and prior_secondary.get("repeat_rate") is not None:
+                repeat_compare = {
+                    "change": repeat_rate["rate"] - prior_secondary["repeat_rate"],
+                    "current": repeat_rate["rate"],
+                    "prior": prior_secondary["repeat_rate"],
+                }
+            refund_compare = None
+            if refunds.get("rate") is not None and prior_secondary.get("refund_rate") is not None:
+                refund_compare = {
+                    "change": refunds["rate"] - prior_secondary["refund_rate"],
+                    "current": refunds["rate"],
+                    "prior": prior_secondary["refund_rate"],
+                }
             omnisend = omnisend_summary(conn, window, stats.get("revenue"))
+            omnisend_split = omnisend_flow_vs_campaign_split(conn, window)
+            omnisend_prior_sends = prior_secondary.get("omnisend_sends")
+            omnisend_prior_attributed = prior_secondary.get("omnisend_attributed")
             meta = meta_channel_vitals(conn, window)
             meta_campaigns = meta_campaign_breakdown(conn, window)
             sparklines = kpi_sparklines(conn, days=window)
+            daily_chart = daily_revenue_and_spend(conn, window)
+            gp_summary = gross_profit_summary(conn, window)
             summary_line = generate_summary(stats, comparison, window)
             three_streams = three_revenue_streams(conn, window_days=window)
             data_quality = data_quality_stats(conn)
@@ -510,6 +563,8 @@ def create_app(conn_factory) -> FastAPI:
                 "comparison": comparison,
                 "window": window,
                 "window_choices": WINDOW_CHOICES,
+                "start_date": start_date,
+                "end_date": end_date,
                 "health": health,
                 "notes": notes,
                 "notes_by_month": notes_by_month,
@@ -534,10 +589,17 @@ def create_app(conn_factory) -> FastAPI:
                 "sku_revenue": sku_revenue,
                 "repeat_rate": repeat_rate,
                 "refunds": refunds,
+                "repeat_compare": repeat_compare,
+                "refund_compare": refund_compare,
                 "omnisend": omnisend,
+                "omnisend_split": omnisend_split,
+                "omnisend_prior_sends": omnisend_prior_sends,
+                "omnisend_prior_attributed": omnisend_prior_attributed,
                 "meta": meta,
                 "meta_campaigns": meta_campaigns,
                 "sparklines": sparklines,
+                "daily_chart": daily_chart,
+                "gp_summary": gp_summary,
                 "summary_line": summary_line,
                 "launch_date": settings.launch_date,
                 "three_streams": three_streams,
@@ -651,8 +713,9 @@ def create_app(conn_factory) -> FastAPI:
 
     @app.get("/subscriptions")
     def subscriptions_page(request: Request, window: int = 30,
+                           start_date: str | None = None, end_date: str | None = None,
                            user: str = Depends(verify_creds)):
-        window = window if window in WINDOW_CHOICES else 30
+        window, start_date, end_date = _resolve_window(window, start_date, end_date)
         conn = conn_factory()
         try:
             from datetime import datetime as _dt
@@ -686,6 +749,7 @@ def create_app(conn_factory) -> FastAPI:
             pause_outcome = pause_outcome_split(conn)
 
             waterfall = subscription_waterfall_v2(conn, now.year, now.month)
+            movement_summary = subscription_movement_summary(conn, now.year, now.month)
             retention = subscription_retention_by_offset(conn)
 
             ltv_12m_all = cohort_ltv_12m(conn)
@@ -699,14 +763,31 @@ def create_app(conn_factory) -> FastAPI:
             churned_count_30d = conn.execute(
                 """
                 select count(*) from subscription_revenue
-                where churned_at >= now() - interval '30 days'
-                """
+                where churned_at >= now() - (%s || ' days')::interval
+                """,
+                (window,),
             ).fetchone()[0] or 0
 
             new_subs_30d = conn.execute(
                 "select count(*) from subscription_revenue "
-                "where converted_at >= now() - interval '30 days'"
+                "where converted_at >= now() - (%s || ' days')::interval",
+                (window,),
             ).fetchone()[0] or 0
+
+            # Recent churn events — surface approximation_reason so inferred
+            # "voluntary" churns are distinguishable from actual cancellations.
+            recent_churn_events = conn.execute(
+                """
+                select se.subscription_id, se.event_date, se.mrr_delta,
+                       se.approximation_reason,
+                       sr.churn_type
+                from subscription_events se
+                join subscription_revenue sr on sr.id = se.subscription_id
+                where se.event_type = 'churn'
+                order by se.event_date desc
+                limit 50
+                """
+            ).fetchall()
         finally:
             conn.close()
 
@@ -717,6 +798,8 @@ def create_app(conn_factory) -> FastAPI:
                 "active": "subscriptions",
                 "window": window,
                 "window_choices": WINDOW_CHOICES,
+                "start_date": start_date,
+                "end_date": end_date,
                 "active_count": active_count,
                 "paused_count": paused_count,
                 "churned_count_30d": churned_count_30d,
@@ -731,19 +814,31 @@ def create_app(conn_factory) -> FastAPI:
                 "pause_rate_last_month": pause,
                 "pause_outcome": pause_outcome,
                 "waterfall": waterfall,
+                "movement_summary": movement_summary,
                 "retention": retention,
                 "ltv_12m": ltv_12m,
                 "ltv_theoretical": ltv_theoretical,
                 "payback": payback,
                 "reactivation": reactivation,
                 "reactivation_by_cohort": reactivation_by_cohort,
+                "recent_churn_events": [
+                    {
+                        "subscription_id": r[0],
+                        "event_date":       r[1],
+                        "mrr_delta":        r[2],
+                        "approximation_reason": r[3],
+                        "churn_type":       r[4],
+                    }
+                    for r in recent_churn_events
+                ],
             },
         )
 
     @app.get("/upsell")
     def upsell(request: Request, window: int = 30,
+               start_date: str | None = None, end_date: str | None = None,
                user: str = Depends(verify_creds)):
-        window = window if window in WINDOW_CHOICES else 30
+        window, start_date, end_date = _resolve_window(window, start_date, end_date)
         conn = conn_factory()
         try:
             upsell_data = upsell_stats(conn, window_days=window)
@@ -758,9 +853,27 @@ def create_app(conn_factory) -> FastAPI:
                 "active": "upsell",
                 "window": window,
                 "window_choices": WINDOW_CHOICES,
+                "start_date": start_date,
+                "end_date": end_date,
                 "upsell_data": upsell_data,
                 "three_streams": three_streams,
                 "serum_ltv": serum_ltv,
+            },
+        )
+
+    @app.get("/setup")
+    def setup(request: Request, user: str = Depends(verify_creds)):
+        conn = conn_factory()
+        try:
+            checklist = setup_checklist(conn, settings)
+        finally:
+            conn.close()
+        return templates.TemplateResponse(
+            request, "setup.html",
+            {
+                "user": _display(request, user),
+                "active": "setup",
+                "checklist": checklist,
             },
         )
 
@@ -889,8 +1002,10 @@ def create_app(conn_factory) -> FastAPI:
     # ── Meta Ads page ─────────────────────────────────────────────────────────
 
     @app.get("/ads")
-    def ads(request: Request, window: int = 7, user: str = Depends(verify_creds)):
-        window = window if window in WINDOW_CHOICES else 7
+    def ads(request: Request, window: int = 7,
+            start_date: str | None = None, end_date: str | None = None,
+            user: str = Depends(verify_creds)):
+        window, start_date, end_date = _resolve_window(window, start_date, end_date)
         conn = conn_factory()
         try:
             meta = meta_channel_vitals(conn, window)
@@ -905,6 +1020,8 @@ def create_app(conn_factory) -> FastAPI:
                 "active": "ads",
                 "window": window,
                 "window_choices": WINDOW_CHOICES,
+                "start_date": start_date,
+                "end_date": end_date,
                 "meta": meta,
                 "campaigns": campaigns,
                 "top_ads": top_ads,

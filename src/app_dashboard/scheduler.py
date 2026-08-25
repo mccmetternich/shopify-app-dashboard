@@ -25,6 +25,53 @@ logger = logging.getLogger(__name__)
 
 WEEKLY_DIGEST_JOB_ID = "weekly_digest"
 
+# ── Advisory lock keys ────────────────────────────────────────────────────────
+#
+# Each ingest job acquires a PostgreSQL session-level advisory lock before
+# doing any work. pg_try_advisory_lock() returns False immediately if another
+# session already holds the lock, so a second scheduler instance (e.g. the
+# old machine during a rolling deploy) skips the job rather than racing.
+#
+# Keys are arbitrary stable integers. They must be unique across job types.
+# The lock is released automatically when the connection closes at job end.
+#
+_LOCK_SHOPIFY  = 1001
+_LOCK_META     = 1002
+_LOCK_RECHARGE = 1003
+
+
+def _acquire_lock(conn, key: int, job_name: str) -> bool:
+    """Attempt to acquire a session advisory lock. Returns True if acquired.
+
+    Session-level advisory locks persist until pg_advisory_unlock() is called
+    or the session ends. Call _release_lock() in a finally block after the job's
+    work is done — do not rely on implicit release via connection teardown.
+    """
+    acquired = conn.execute(
+        "select pg_try_advisory_lock(%s)", (key,)
+    ).fetchone()[0]
+    if not acquired:
+        logger.info(
+            "%s: advisory lock %d held by another instance — skipping this run",
+            job_name, key,
+        )
+    return acquired
+
+
+def _release_lock(conn, key: int) -> None:
+    """Explicitly release a session advisory lock acquired by _acquire_lock().
+
+    Called in finally after the job's work commits. If the connection is already
+    broken, logs a warning and allows session end to clean up the lock.
+    """
+    try:
+        conn.execute("select pg_advisory_unlock(%s)", (key,))
+    except Exception as exc:
+        logger.warning(
+            "advisory unlock %d failed — lock will release on session end: %s",
+            key, exc,
+        )
+
 
 # ── Error recording ────────────────────────────────────────────────────────────
 
@@ -101,8 +148,14 @@ def run_digest_job(conn_factory, settings) -> None:
 def run_snapshot_job(conn_factory, settings) -> None:
     """Write today's subscription state snapshot. Always runs — no token needed."""
     from app_dashboard.snapshot import take_subscription_snapshot
+    from app_dashboard.ingest_recharge import ensure_event_backfill
     conn = conn_factory()
     try:
+        # Backfill subscription events from DB state — no API token required.
+        # Catches historical imports, seed data, and any row that predates the
+        # event system. Runs before the snapshot so the snapshot's winback count
+        # sees the fully backfilled event table.
+        ensure_event_backfill(conn)
         take_subscription_snapshot(conn)
         logger.info("subscription_snapshot: complete")
     except Exception as exc:
@@ -125,7 +178,11 @@ def run_shopify_sync_job(conn_factory, settings) -> None:
     from app_dashboard.shopify_admin import ShopifyAdminClient
     from app_dashboard.ingest_shopify import sync_orders
     conn = conn_factory()
+    lock_held = False
     try:
+        lock_held = _acquire_lock(conn, _LOCK_SHOPIFY, "shopify_sync")
+        if not lock_held:
+            return
         with ShopifyAdminClient(
             shop_domain=settings.shopify_shop_domain,
             access_token=settings.shopify_admin_token,
@@ -137,6 +194,8 @@ def run_shopify_sync_job(conn_factory, settings) -> None:
         logger.exception("shopify_sync failed")
         _record_sync_error(conn_factory, SOURCE_SHOPIFY, exc)
     finally:
+        if lock_held:
+            _release_lock(conn, _LOCK_SHOPIFY)
         conn.close()
 
 
@@ -151,7 +210,11 @@ def run_meta_sync_job(conn_factory, settings) -> None:
     from app_dashboard.meta_insights import MetaInsightsClient
     from app_dashboard.ingest_meta import sync_ad_spend
     conn = conn_factory()
+    lock_held = False
     try:
+        lock_held = _acquire_lock(conn, _LOCK_META, "meta_sync")
+        if not lock_held:
+            return
         with MetaInsightsClient(
             account_id=settings.meta_account_id,
             access_token=settings.meta_access_token,
@@ -164,6 +227,8 @@ def run_meta_sync_job(conn_factory, settings) -> None:
         logger.exception("meta_sync failed")
         _record_sync_error(conn_factory, SOURCE_META, exc)
     finally:
+        if lock_held:
+            _release_lock(conn, _LOCK_META)
         conn.close()
 
 
@@ -178,7 +243,11 @@ def run_recharge_sync_job(conn_factory, settings) -> None:
     from app_dashboard.recharge import RechargeClient
     from app_dashboard.ingest_recharge import sync_subscription_revenue, sync_subscription_events
     conn = conn_factory()
+    lock_held = False
     try:
+        lock_held = _acquire_lock(conn, _LOCK_RECHARGE, "recharge_sync")
+        if not lock_held:
+            return
         with RechargeClient(api_token=settings.recharge_api_token) as client:
             n = sync_subscription_revenue(conn, client)
             logger.info("recharge_sync: %d subscription rows upserted", n)
@@ -193,6 +262,8 @@ def run_recharge_sync_job(conn_factory, settings) -> None:
         logger.exception("recharge_sync failed")
         _record_sync_error(conn_factory, SOURCE_RECHARGE, exc)
     finally:
+        if lock_held:
+            _release_lock(conn, _LOCK_RECHARGE)
         conn.close()
 
 
