@@ -76,7 +76,6 @@ from app_dashboard.stats import (
     rev_churn_voluntary,
     revenue_by_month,
     serum_vs_capsules_ltv,
-    skip_rate,
     subscription_mrr_recognized_and_cash,
     subscription_retention,
     subscription_retention_by_offset,
@@ -683,7 +682,6 @@ def create_app(conn_factory) -> FastAPI:
                 "involuntary": rev_churn_involuntary(conn, lm_year, lm_month),
             }
 
-            skip = skip_rate(conn, lm_year, lm_month)
             pause = pause_rate(conn, lm_year, lm_month)
             pause_outcome = pause_outcome_split(conn)
 
@@ -730,7 +728,6 @@ def create_app(conn_factory) -> FastAPI:
                 "cash_collected": mrr_cash["cash_collected"],
                 "churn": churn,
                 "rev_churn": rev_churn,
-                "skip_rate_last_month": skip,
                 "pause_rate_last_month": pause,
                 "pause_outcome": pause_outcome,
                 "waterfall": waterfall,

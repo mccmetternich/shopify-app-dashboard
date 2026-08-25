@@ -61,14 +61,22 @@ def take_subscription_snapshot(conn: psycopg.Connection) -> None:
         (today,),
     ).fetchone()[0] or 0
 
-    # Win-back / reactivation events today
-    reactivations = conn.execute(
-        """
-        select count(*) from subscription_events
-        where event_type = 'winback' and event_date = %s
-        """,
-        (today,),
-    ).fetchone()[0] or 0
+    # Win-back / reactivation events today.
+    # Returns NULL when subscription_events is empty — writing 0 would be indistinguishable
+    # from "zero reactivations occurred" and would look like measured data.
+    has_events = conn.execute(
+        "select exists(select 1 from subscription_events limit 1)"
+    ).fetchone()[0]
+    if has_events:
+        reactivations: int | None = conn.execute(
+            """
+            select count(*) from subscription_events
+            where event_type = 'winback' and event_date = %s
+            """,
+            (today,),
+        ).fetchone()[0] or 0
+    else:
+        reactivations = None
 
     conn.execute(
         """
@@ -91,7 +99,7 @@ def take_subscription_snapshot(conn: psycopg.Connection) -> None:
     conn.commit()
     logger.info(
         "subscription_snapshot: %s — active=%d paused=%d churned=%d new=%d "
-        "churned_today=%d reactivations=%d mrr=%s",
+        "churned_today=%d reactivations=%s mrr=%s",
         today, active_count, paused_count, churned_count,
         new_subs, churned_today, reactivations, mrr_recognized,
     )

@@ -2055,7 +2055,8 @@ def paused_subscribers(conn: psycopg.Connection) -> dict:
 
 def pause_rate(conn: psycopg.Connection, year: int, month: int) -> Optional[Decimal]:
     """Pauses starting in the given month / active subs at month start.
-    Returns None if no active subs at month start."""
+    Returns None if no active subs at month start, or if subscription_events is empty
+    (cannot distinguish zero pauses from untracked pauses)."""
     month_start = f"{year}-{month:02d}-01"
     at_start = conn.execute(
         """
@@ -2068,6 +2069,12 @@ def pause_rate(conn: psycopg.Connection, year: int, month: int) -> Optional[Deci
         (month_start, month_start),
     ).fetchone()[0]
     if not at_start:
+        return None
+
+    has_events = conn.execute(
+        "select exists(select 1 from subscription_events limit 1)"
+    ).fetchone()[0]
+    if not has_events:
         return None
 
     pauses = conn.execute(
@@ -2224,11 +2231,18 @@ def blended_cac_excl_reactivations(conn: psycopg.Connection, window_days: int = 
     return total_spend / Decimal(str(new_customers))
 
 
-def subscription_waterfall_v2(conn: psycopg.Connection, year: int, month: int) -> dict:
+def subscription_waterfall_v2(conn: psycopg.Connection, year: int, month: int) -> Optional[dict]:
     """Extends subscription_waterfall to include a 'reactivation_mrr' bucket.
     Returns: beginning_mrr, new_mrr, reactivation_mrr, expansion_mrr,
              contraction_mrr, churned_mrr_voluntary, churned_mrr_involuntary, ending_mrr.
-    Reactivation MRR = sum of mrr_delta for 'winback' events in the month."""
+    Reactivation MRR = sum of mrr_delta for 'winback' events in the month.
+    Returns None when subscription_events is empty — cannot distinguish zero from no data."""
+    has_events = conn.execute(
+        "select exists(select 1 from subscription_events limit 1)"
+    ).fetchone()[0]
+    if not has_events:
+        return None
+
     base = subscription_waterfall(conn, year, month)
     month_start = f"{year}-{month:02d}-01"
     reactivation_mrr = conn.execute(

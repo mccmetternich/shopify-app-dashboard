@@ -130,12 +130,6 @@
                 {% if rev_churn.involuntary is not none %}{{ "%.1f"|format(rev_churn.involuntary * 100) }}%{% else %}—{% endif %}
             </div>
         </div>
-        <div class="card stat">
-            <div class="label">Skip rate — last month</div>
-            <div class="num">
-                {% if skip_rate_last_month is not none %}{{ "%.1f"|format(skip_rate_last_month * 100) }}%{% else %}—{% endif %}
-            </div>
-        </div>
     </div>
 </div>
 
@@ -239,17 +233,6 @@
                 <td>
                     {% if churn.involuntary_rate is none %}<span class="sub">No data</span>
                     {% elif churn.involuntary_rate <= 0.02 %}<span class="pill installed">On target</span>
-                    {% else %}<span class="pill" style="background:rgba(232,89,12,.1);color:var(--down);">Above target</span>
-                    {% endif %}
-                </td>
-            </tr>
-            <tr>
-                <td>Skip rate</td>
-                <td class="num">≤8%</td>
-                <td class="num">{% if skip_rate_last_month is not none %}{{ "%.1f"|format(skip_rate_last_month * 100) }}%{% else %}—{% endif %}</td>
-                <td>
-                    {% if skip_rate_last_month is none %}<span class="sub">No data</span>
-                    {% elif skip_rate_last_month <= 0.08 %}<span class="pill installed">On target</span>
                     {% else %}<span class="pill" style="background:rgba(232,89,12,.1);color:var(--down);">Above target</span>
                     {% endif %}
                 </td>
