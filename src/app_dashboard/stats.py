@@ -1532,7 +1532,8 @@ def rev_churn_involuntary(conn: psycopg.Connection, year: int, month: int) -> Op
     ).fetchone()[0]
     if churned_mrr is None:
         return Decimal("0")
-    return churned_mrr / mrr_at_start
+    raw = churned_mrr / mrr_at_start
+    return raw.quantize(Decimal("0.01"))
 
 
 def skip_rate(conn: psycopg.Connection, year: int, month: int) -> Optional[Decimal]:
@@ -2491,4 +2492,194 @@ def omnisend_summary(conn: psycopg.Connection, window_days: int, total_revenue) 
         "revenue_share": rev_share,
         "top_flows": [{"name": r[0], "revenue": r[1], "clicks": r[2]} for r in top_flows_rows],
         "has_data": True,
+    }
+
+
+# ── Data quality stats ────────────────────────────────────────────────────────
+
+def data_quality_stats(conn: psycopg.Connection) -> dict:
+    """Returns data quality indicators:
+    - orders_no_customer_pct: % orders with customer_id IS NULL
+    - orphan_sub_rebills: count of subscription_revenue rows where customer_id not in customers
+    - last_sync_per_source: dict of {source_key: last_synced_at} from sync_state
+    - total_orders: total order count
+    - total_subs: total subscription_revenue count
+    """
+    total_orders = conn.execute("select count(*) from orders").fetchone()[0] or 0
+    orders_no_customer = conn.execute(
+        "select count(*) from orders where customer_id is null"
+    ).fetchone()[0] or 0
+
+    orders_no_customer_pct = (
+        Decimal("100") * Decimal(orders_no_customer) / Decimal(total_orders)
+        if total_orders else Decimal("0")
+    )
+
+    total_subs = conn.execute("select count(*) from subscription_revenue").fetchone()[0] or 0
+
+    orphan_sub_rebills = conn.execute(
+        """
+        select count(*) from subscription_revenue sr
+        where sr.customer_id is not null
+          and not exists (select 1 from customers c where c.id = sr.customer_id)
+        """
+    ).fetchone()[0] or 0
+
+    # Try to get sync state — table may not exist yet
+    last_sync_per_source = {}
+    try:
+        rows = conn.execute("select source_key, last_synced_at from sync_state").fetchall()
+        for source_key, last_synced_at in rows:
+            last_sync_per_source[source_key] = last_synced_at
+    except Exception:
+        pass  # sync_state table not present yet
+
+    # Derive age strings
+    from datetime import datetime as _dt
+    now = _utcnow()
+    SOURCES = ["shopify_orders", "meta_ad_spend", "recharge", "ga4_funnel"]
+    source_rows = []
+    for src in SOURCES:
+        synced_at = last_sync_per_source.get(src)
+        if synced_at is None:
+            age_minutes = None
+            age_str = "Never"
+            status = "never"
+        else:
+            diff = now - synced_at
+            age_minutes = int(diff.total_seconds() / 60)
+            if age_minutes < 60:
+                age_str = f"{age_minutes} min ago"
+            elif age_minutes < 1440:
+                age_str = f"{age_minutes // 60}h ago"
+            else:
+                age_str = f"{age_minutes // 1440}d ago"
+            if age_minutes > 1440:
+                status = "red"
+            elif age_minutes > 240:
+                status = "amber"
+            else:
+                status = "ok"
+        source_rows.append({
+            "source": src,
+            "synced_at": synced_at,
+            "age_str": age_str,
+            "status": status,
+        })
+
+    return {
+        "total_orders": total_orders,
+        "orders_no_customer": orders_no_customer,
+        "orders_no_customer_pct": orders_no_customer_pct,
+        "orphan_sub_rebills": orphan_sub_rebills,
+        "total_subs": total_subs,
+        "last_sync_per_source": last_sync_per_source,
+        "source_rows": source_rows,
+    }
+
+
+def subscription_mrr_recognized_and_cash(conn: psycopg.Connection) -> dict:
+    """For the current calendar month: mrr_recognized and cash_collected."""
+    now = _utcnow()
+    year, month = now.year, now.month
+    mrr = mrr_recognized(conn, year, month) or Decimal("0")
+    cash = cash_collected_in_month(conn, year, month) or Decimal("0")
+    return {"mrr_recognized": mrr, "cash_collected": cash}
+
+
+def serum_vs_capsules_ltv(conn: psycopg.Connection) -> dict:
+    """Compares 12m LTV for serum-only vs serum+capsules subscribers.
+    Returns dict with serum_only and serum_capsules sub-dicts."""
+    now = _utcnow()
+    cutoff_cohort = now - timedelta(days=365)
+
+    settings = {
+        r[0]: Decimal(str(r[1]))
+        for r in conn.execute("select key, value from cost_settings").fetchall()
+    }
+    shipping = settings.get("shipping_cost_per_order", Decimal("0"))
+    payment_fee_pct = settings.get("payment_fee_pct", Decimal("0"))
+
+    def _compute_ltv(customer_ids: list) -> Optional[Decimal]:
+        if not customer_ids:
+            return None
+        placeholders = ",".join(["%s"] * len(customer_ids))
+        order_rows = conn.execute(
+            f"""
+            select o.total, o.refunded, o.discount_amount, o.line_items
+            from orders o
+            join customers c on c.id = o.customer_id
+            where c.id in ({placeholders})
+              and c.first_order_at < %s
+              and o.created_at >= c.first_order_at
+              and o.created_at < c.first_order_at + interval '12 months'
+            """,
+            tuple(customer_ids) + (cutoff_cohort,),
+        ).fetchall()
+        total_gp = Decimal("0")
+        for total, refunded, discount_amount, line_items in order_rows:
+            discount_amount = discount_amount or Decimal("0")
+            line_items = line_items or []
+            cogs = Decimal("0")
+            for item in (line_items if isinstance(line_items, list) else []):
+                sku = item.get("sku") if isinstance(item, dict) else None
+                qty = Decimal(str(item.get("quantity", 1))) if isinstance(item, dict) else Decimal("1")
+                if sku:
+                    cogs_row = conn.execute(
+                        "select cogs_per_unit from cost_inputs where sku = %s", (sku,)
+                    ).fetchone()
+                    if cogs_row:
+                        cogs += qty * cogs_row[0]
+            gp = (total - refunded - discount_amount) - cogs - shipping - (total * payment_fee_pct)
+            total_gp += gp
+        return total_gp / Decimal(len(customer_ids)) if customer_ids else None
+
+    # Serum-only: sub orders that ONLY contain HAIR-SERUM-50ML
+    serum_only_custs = conn.execute(
+        """
+        select distinct o.customer_id
+        from orders o
+        where o.is_subscription_order = true
+          and o.customer_id is not null
+          and not exists (
+            select 1 from jsonb_array_elements(o.line_items) li
+            where li->>'sku' != 'HAIR-SERUM-50ML'
+          )
+          and exists (
+            select 1 from jsonb_array_elements(o.line_items) li
+            where li->>'sku' = 'HAIR-SERUM-50ML'
+          )
+        """
+    ).fetchall()
+    serum_only_ids = [r[0] for r in serum_only_custs]
+
+    # Serum + capsules: sub orders with DSL-CAPS-90 in any order
+    serum_caps_custs = conn.execute(
+        """
+        select distinct o.customer_id
+        from orders o
+        where o.is_subscription_order = true
+          and o.customer_id is not null
+          and exists (
+            select 1 from jsonb_array_elements(o.line_items) li
+            where li->>'sku' = 'DSL-CAPS-90'
+          )
+        """
+    ).fetchall()
+    serum_caps_ids = [r[0] for r in serum_caps_custs]
+
+    serum_only_ltv = _compute_ltv(serum_only_ids)
+    serum_caps_ltv = _compute_ltv(serum_caps_ids)
+
+    delta = None
+    delta_pct = None
+    if serum_only_ltv is not None and serum_caps_ltv is not None and serum_only_ltv > 0:
+        delta = serum_caps_ltv - serum_only_ltv
+        delta_pct = round(float(delta / serum_only_ltv * 100), 1)
+
+    return {
+        "serum_only": {"ltv": serum_only_ltv, "count": len(serum_only_ids)},
+        "serum_capsules": {"ltv": serum_caps_ltv, "count": len(serum_caps_ids)},
+        "delta": delta,
+        "delta_pct": delta_pct,
     }

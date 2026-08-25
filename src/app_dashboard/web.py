@@ -50,17 +50,38 @@ from app_dashboard.ranges import (
 from app_dashboard.scheduler import start_scheduler
 from app_dashboard.security import RateLimiter, SecurityHeadersMiddleware, client_key
 from app_dashboard.stats import (
+    active_subscribers,
+    cohort_ltv_12m,
     collected_revenue,
     customer_cohorts,
+    data_quality_stats,
     days_of_cover,
+    logo_churn_involuntary,
+    logo_churn_voluntary,
     monthly_activity,
     mrr_movements,
+    mrr_recognized,
     mrr_trend,
+    offer_segmented_cohorts,
     overview_comparison,
     overview_stats,
+    pause_outcome_split,
+    pause_rate,
+    paused_subscribers,
+    payback_timing,
+    reactivation_rate_by_cohort,
+    reactivation_stats,
     recent_events,
+    rev_churn_involuntary,
+    rev_churn_voluntary,
     revenue_by_month,
+    serum_vs_capsules_ltv,
+    skip_rate,
+    subscription_mrr_recognized_and_cash,
     subscription_retention,
+    subscription_retention_by_offset,
+    subscription_waterfall_v2,
+    subs_in_dunning,
     survey_tally,
     funnel_stats,
     funnel_by_source,
@@ -75,6 +96,9 @@ from app_dashboard.stats import (
     meta_channel_vitals,
     meta_campaign_breakdown,
     meta_top_ads,
+    theoretical_ltv,
+    three_revenue_streams,
+    upsell_stats,
 )
 from app_dashboard.usage import (
     MAX_BODY_BYTES,
@@ -462,6 +486,8 @@ def create_app(conn_factory) -> FastAPI:
             meta_campaigns = meta_campaign_breakdown(conn, window)
             sparklines = kpi_sparklines(conn, days=window)
             summary_line = generate_summary(stats, comparison, window)
+            three_streams = three_revenue_streams(conn, window_days=window)
+            data_quality = data_quality_stats(conn)
         finally:
             conn.close()
 
@@ -515,6 +541,8 @@ def create_app(conn_factory) -> FastAPI:
                 "sparklines": sparklines,
                 "summary_line": summary_line,
                 "launch_date": settings.launch_date,
+                "three_streams": three_streams,
+                "data_quality": data_quality,
             },
         )
 
@@ -608,6 +636,7 @@ def create_app(conn_factory) -> FastAPI:
         try:
             cohort_data = customer_cohorts(conn)
             sub_retention = subscription_retention(conn)
+            offer_cohorts = offer_segmented_cohorts(conn)
         finally:
             conn.close()
         return templates.TemplateResponse(
@@ -617,8 +646,218 @@ def create_app(conn_factory) -> FastAPI:
                 "active": "cohorts",
                 "cohorts": cohort_data,
                 "sub_retention": sub_retention,
+                "offer_cohorts": offer_cohorts,
             },
         )
+
+    @app.get("/subscriptions")
+    def subscriptions_page(request: Request, window: int = 30,
+                           user: str = Depends(verify_creds)):
+        window = window if window in WINDOW_CHOICES else 30
+        conn = conn_factory()
+        try:
+            from datetime import datetime as _dt
+            now = _dt.now(__import__("datetime").timezone.utc)
+            last_month = (now.replace(day=1) - __import__("datetime").timedelta(days=1))
+            lm_year, lm_month = last_month.year, last_month.month
+
+            active_count = active_subscribers(conn)
+            paused_data = paused_subscribers(conn)
+            paused_count = paused_data["count"]
+            subs_in_dunning_data = subs_in_dunning(conn)
+            new_mrr_30d = mrr_recognized(conn, now.year, now.month) or 0
+            mrr_cash = subscription_mrr_recognized_and_cash(conn)
+
+            churn = {
+                "voluntary_rate": logo_churn_voluntary(conn, lm_year, lm_month),
+                "involuntary_rate": logo_churn_involuntary(conn, lm_year, lm_month),
+            }
+            if churn["voluntary_rate"] is not None or churn["involuntary_rate"] is not None:
+                from decimal import Decimal as D
+                churn["total_rate"] = (churn["voluntary_rate"] or D("0")) + (churn["involuntary_rate"] or D("0"))
+            else:
+                churn["total_rate"] = None
+
+            rev_churn = {
+                "voluntary": rev_churn_voluntary(conn, lm_year, lm_month),
+                "involuntary": rev_churn_involuntary(conn, lm_year, lm_month),
+            }
+
+            skip = skip_rate(conn, lm_year, lm_month)
+            pause = pause_rate(conn, lm_year, lm_month)
+            pause_outcome = pause_outcome_split(conn)
+
+            waterfall = subscription_waterfall_v2(conn, now.year, now.month)
+            retention = subscription_retention_by_offset(conn)
+
+            ltv_12m_all = cohort_ltv_12m(conn)
+            ltv_12m = ltv_12m_all[:6]
+            ltv_theoretical = theoretical_ltv(conn)
+
+            payback = payback_timing(conn)[:6]
+            reactivation = reactivation_stats(conn, window_days=90)
+            reactivation_by_cohort = reactivation_rate_by_cohort(conn)
+
+            churned_count_30d = conn.execute(
+                """
+                select count(*) from subscription_revenue
+                where churned_at >= now() - interval '30 days'
+                """
+            ).fetchone()[0] or 0
+
+            new_subs_30d = conn.execute(
+                "select count(*) from subscription_revenue "
+                "where converted_at >= now() - interval '30 days'"
+            ).fetchone()[0] or 0
+        finally:
+            conn.close()
+
+        return templates.TemplateResponse(
+            request, "subscriptions.html",
+            {
+                "user": _display(request, user),
+                "active": "subscriptions",
+                "window": window,
+                "window_choices": WINDOW_CHOICES,
+                "active_count": active_count,
+                "paused_count": paused_count,
+                "churned_count_30d": churned_count_30d,
+                "paused": paused_data,
+                "subs_in_dunning_data": subs_in_dunning_data,
+                "new_subs_30d": new_subs_30d,
+                "new_mrr_30d": new_mrr_30d,
+                "mrr_recognized": mrr_cash["mrr_recognized"],
+                "cash_collected": mrr_cash["cash_collected"],
+                "churn": churn,
+                "rev_churn": rev_churn,
+                "skip_rate_last_month": skip,
+                "pause_rate_last_month": pause,
+                "pause_outcome": pause_outcome,
+                "waterfall": waterfall,
+                "retention": retention,
+                "ltv_12m": ltv_12m,
+                "ltv_theoretical": ltv_theoretical,
+                "payback": payback,
+                "reactivation": reactivation,
+                "reactivation_by_cohort": reactivation_by_cohort,
+            },
+        )
+
+    @app.get("/upsell")
+    def upsell(request: Request, window: int = 30,
+               user: str = Depends(verify_creds)):
+        window = window if window in WINDOW_CHOICES else 30
+        conn = conn_factory()
+        try:
+            upsell_data = upsell_stats(conn, window_days=window)
+            three_streams = three_revenue_streams(conn, window_days=window)
+            serum_ltv = serum_vs_capsules_ltv(conn)
+        finally:
+            conn.close()
+        return templates.TemplateResponse(
+            request, "upsell.html",
+            {
+                "user": _display(request, user),
+                "active": "upsell",
+                "window": window,
+                "window_choices": WINDOW_CHOICES,
+                "upsell_data": upsell_data,
+                "three_streams": three_streams,
+                "serum_ltv": serum_ltv,
+            },
+        )
+
+    @app.get("/quality")
+    def quality(request: Request, user: str = Depends(verify_creds)):
+        conn = conn_factory()
+        try:
+            quality = data_quality_stats(conn)
+        finally:
+            conn.close()
+        return templates.TemplateResponse(
+            request, "quality.html",
+            {
+                "user": _display(request, user),
+                "active": "quality",
+                "quality": quality,
+            },
+        )
+
+    @app.get("/settings/costs")
+    def settings_costs_get(request: Request, user: str = Depends(verify_creds)):
+        conn = conn_factory()
+        try:
+            cost_inputs_rows = conn.execute(
+                "select sku, label, cogs_per_unit from cost_inputs order by sku"
+            ).fetchall()
+            cost_settings_rows = conn.execute(
+                "select key, value, label from cost_settings order by key"
+            ).fetchall()
+        finally:
+            conn.close()
+        flash = request.query_params.get("saved")
+        return templates.TemplateResponse(
+            request, "settings_costs.html",
+            {
+                "user": _display(request, user),
+                "active": "settings_costs",
+                "cost_inputs": [{"sku": r[0], "label": r[1], "cogs": r[2]} for r in cost_inputs_rows],
+                "cost_settings": {r[0]: {"value": r[1], "label": r[2]} for r in cost_settings_rows},
+                "flash": flash,
+            },
+        )
+
+    @app.post("/settings/costs")
+    async def settings_costs_post(request: Request, user: str = Depends(verify_creds)):
+        origin = request.headers.get("origin")
+        if origin and origin.rstrip("/") != settings.public_base_url.rstrip("/"):
+            raise HTTPException(status_code=403, detail="Cross-origin write refused")
+        body = await _read_capped(request)
+        from urllib.parse import parse_qs
+        form = parse_qs(body.decode("utf-8", "replace"))
+
+        conn = conn_factory()
+        try:
+            # Update cost_inputs (COGS per SKU)
+            skus = conn.execute("select sku from cost_inputs").fetchall()
+            for (sku,) in skus:
+                field_name = f"cogs_{sku.replace('-', '_')}"
+                values = form.get(field_name)
+                if values:
+                    try:
+                        cogs = float(values[0])
+                        conn.execute(
+                            "update cost_inputs set cogs_per_unit = %s, updated_at = now() where sku = %s",
+                            (cogs, sku),
+                        )
+                    except (ValueError, TypeError):
+                        pass
+
+            # Update cost_settings
+            setting_keys = {
+                "shipping_cost_per_order": "shipping",
+                "payment_fee_pct": "payment_fee_pct",
+                "return_processing_cost": "return_cost",
+            }
+            for key, field_suffix in setting_keys.items():
+                values = form.get(field_suffix)
+                if values:
+                    try:
+                        val = float(values[0])
+                        # Payment fee: convert from % to decimal if > 1
+                        if key == "payment_fee_pct" and val > 1:
+                            val = val / 100.0
+                        conn.execute(
+                            "update cost_settings set value = %s, updated_at = now() where key = %s",
+                            (val, key),
+                        )
+                    except (ValueError, TypeError):
+                        pass
+
+            conn.commit()
+        finally:
+            conn.close()
+        return RedirectResponse("/settings/costs?saved=1", status_code=303)
 
     # ── Survey page (new: Phase C) ────────────────────────────────────────────
 

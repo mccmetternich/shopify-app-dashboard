@@ -784,6 +784,208 @@ def seed_ga4_funnel(conn) -> None:
     conn.commit()
 
 
+# ── Long-history cohort seed ─────────────────────────────────────────────────
+
+def seed_long_history_cohort(conn, rng) -> None:
+    """Seed 40 customers in Jan 2025 with 18 months of orders, subscriptions, churn, and win-backs.
+
+    Provides the long-dated history needed for cohort_ltv_12m() and payback_timing()
+    to return real values. Uses rng for all random choices (deterministic with fixed seed).
+
+    Prints: "Long-history cohort seeded: 40 customers, Jan 2025, 18 months of orders."
+    """
+    import hashlib
+    from datetime import date as _date
+
+    COHORT_SIZE = 40
+    COHORT_BASE = datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+    # M0 prices: 30 full-price at $149, 10 steep-discount at $89
+    m0_prices = [Decimal("149")] * 30 + [Decimal("89")] * 10
+    rng.shuffle(m0_prices)
+
+    customers = []
+    for i in range(COHORT_SIZE):
+        cid = f"lh_c{i:03d}"
+        day_of_jan = rng.randint(1, 28)
+        first_order_dt = datetime(2025, 1, day_of_jan, 10, tzinfo=timezone.utc)
+        email_hash = hashlib.sha256(f"lh_customer_{i}".encode()).hexdigest()
+        conn.execute(
+            "insert into customers (id, email_hash, first_order_at, country) "
+            "values (%s, %s, %s, 'US') on conflict (id) do nothing",
+            (cid, email_hash, first_order_dt),
+        )
+        conn.execute(
+            "update customers set acquisition_offer = %s where id = %s",
+            ("full-price" if m0_prices[i] == Decimal("149") else "steep-intro-discount", cid),
+        )
+        customers.append({"id": cid, "first_order_at": first_order_dt, "m0_price": m0_prices[i]})
+
+    # Ad spend for Jan 2025: 31 days × $230/day (~$7,130 total)
+    for day in range(1, 32):
+        spend_date = _date(2025, 1, day)
+        conn.execute(
+            "insert into ad_spend (date, campaign_id, campaign_name, platform, spend) "
+            "values (%s, %s, %s, %s, %s) on conflict (date, campaign_id) do nothing",
+            (spend_date, "cohort-meta-jan2025", "Meta Jan 2025 Cohort", "meta", Decimal("230.00")),
+        )
+
+    # Churn schedule (using deterministic rng)
+    churn_at_m3 = sorted(rng.sample(range(COHORT_SIZE), 8))
+    voluntary_m3 = churn_at_m3[:6]
+    involuntary_m3 = churn_at_m3[6:]
+    remaining = [i for i in range(COHORT_SIZE) if i not in churn_at_m3]
+    churn_at_m6 = sorted(rng.sample(remaining, 5))
+    remaining = [i for i in remaining if i not in churn_at_m6]
+    churn_at_m9 = sorted(rng.sample(remaining, 3))
+    remaining = [i for i in remaining if i not in churn_at_m9]
+    churn_at_m12 = sorted(rng.sample(remaining, 2))
+    winback_at_m10 = churn_at_m3[:3]
+
+    retention_schedule = {1: 0.70, 2: 0.65, 3: 0.58, 4: 0.52, 5: 0.48,
+                          6: 0.42, 7: 0.40, 8: 0.38, 9: 0.36, 10: 0.34,
+                          11: 0.33, 12: 0.32, 13: 0.31, 14: 0.31, 15: 0.30,
+                          16: 0.30, 17: 0.30, 18: 0.30}
+
+    order_idx = 5000  # offset to avoid collisions with main seed
+    sub_idx = 5000
+
+    now = datetime.now(timezone.utc)
+
+    for i, cust in enumerate(customers):
+        cid = cust["id"]
+        first_order_dt = cust["first_order_at"]
+        m0_price = cust["m0_price"]
+
+        if i in churn_at_m3:
+            churn_offset = 3
+        elif i in churn_at_m6:
+            churn_offset = 6
+        elif i in churn_at_m9:
+            churn_offset = 9
+        elif i in churn_at_m12:
+            churn_offset = 12
+        else:
+            churn_offset = None
+
+        # M0 order
+        oid = f"lh_ord_{order_idx:05d}"
+        order_idx += 1
+        conn.execute(
+            "insert into orders "
+            "(id, customer_id, created_at, total, refunded, currency, "
+            " is_new_customer, is_subscription_order, discount_amount, line_items) "
+            "values (%s, %s, %s, %s, %s, 'USD', true, false, %s, %s::jsonb) "
+            "on conflict (id) do nothing",
+            (
+                oid, cid, first_order_dt, m0_price, Decimal("0"),
+                Decimal("149") - m0_price if m0_price < Decimal("149") else Decimal("0"),
+                f'[{{"sku":"HAIR-SERUM-50ML","quantity":1,"unit_price":{float(m0_price)}}}]',
+            ),
+        )
+
+        # Subscription
+        sid = f"lh_sub_{sub_idx:05d}"
+        sub_idx += 1
+        churned_at_dt = (first_order_dt + timedelta(days=30 * churn_offset)) if churn_offset else None
+        sub_status = "churned" if churn_offset else "active"
+        is_involuntary = (i in involuntary_m3)
+        dunning_started = (churned_at_dt - timedelta(days=15)) if is_involuntary and churned_at_dt else None
+
+        conn.execute(
+            "insert into subscription_revenue "
+            "(id, customer_id, monthly_amount, converted_at, churned_at, "
+            " sub_type, cash_collected, churn_type, churn_reason, dunning_started_at, status) "
+            "values (%s, %s, %s, %s, %s, 'monthly', %s, %s, %s, %s, %s) "
+            "on conflict (id) do nothing",
+            (
+                sid, cid, Decimal("129"), first_order_dt, churned_at_dt,
+                Decimal("129"),
+                "involuntary" if is_involuntary else ("voluntary" if churn_offset else None),
+                "payment_failed" if is_involuntary else ("cancelled" if churn_offset else None),
+                dunning_started,
+                sub_status,
+            ),
+        )
+
+        # Subscription events
+        conn.execute(
+            "insert into subscription_events "
+            "(subscription_id, customer_id, event_type, event_date, mrr_delta) "
+            "values (%s, %s, 'new', %s, %s)",
+            (sid, cid, first_order_dt.date(), Decimal("129")),
+        )
+        if churned_at_dt:
+            conn.execute(
+                "insert into subscription_events "
+                "(subscription_id, customer_id, event_type, event_date, mrr_delta, reason) "
+                "values (%s, %s, 'churn', %s, %s, %s)",
+                (sid, cid, churned_at_dt.date(), Decimal("-129"),
+                 "payment_failed" if is_involuntary else "cancelled"),
+            )
+
+        # M1-M18 subscription rebill orders
+        active_through = churn_offset - 1 if churn_offset else 18
+        for month_offset in range(1, active_through + 1):
+            retain_prob = retention_schedule.get(month_offset, 0.30)
+            if rng.random() < retain_prob:
+                rebill_date = first_order_dt + timedelta(days=30 * month_offset)
+                if rebill_date > now:
+                    break
+                oid = f"lh_ord_{order_idx:05d}"
+                order_idx += 1
+                conn.execute(
+                    "insert into orders "
+                    "(id, customer_id, created_at, total, refunded, currency, "
+                    " is_new_customer, is_subscription_order, discount_amount, line_items) "
+                    "values (%s, %s, %s, %s, %s, 'USD', false, true, %s, %s::jsonb) "
+                    "on conflict (id) do nothing",
+                    (
+                        oid, cid, rebill_date, Decimal("129"), Decimal("0"), Decimal("0"),
+                        f'[{{"sku":"HAIR-SERUM-50ML","quantity":1,"unit_price":129.0}}]',
+                    ),
+                )
+
+        # Win-back customers at M10
+        if i in winback_at_m10 and churn_offset:
+            wb_date = first_order_dt + timedelta(days=30 * 10)
+            if wb_date <= now:
+                wb_sid = f"lh_sub_wb_{i:03d}"
+                conn.execute(
+                    "insert into subscription_revenue "
+                    "(id, customer_id, monthly_amount, converted_at, churned_at, "
+                    " sub_type, cash_collected, status) "
+                    "values (%s, %s, %s, %s, null, 'monthly', %s, 'active') "
+                    "on conflict (id) do nothing",
+                    (wb_sid, cid, Decimal("129"), wb_date, Decimal("129")),
+                )
+                conn.execute(
+                    "insert into subscription_events "
+                    "(subscription_id, customer_id, event_type, event_date, mrr_delta) "
+                    "values (%s, %s, 'winback', %s, %s)",
+                    (wb_sid, cid, wb_date.date(), Decimal("129")),
+                )
+                oid = f"lh_ord_{order_idx:05d}"
+                order_idx += 1
+                conn.execute(
+                    "insert into orders "
+                    "(id, customer_id, created_at, total, refunded, currency, "
+                    " is_new_customer, is_subscription_order, discount_amount, line_items) "
+                    "values (%s, %s, %s, %s, %s, 'USD', false, true, %s, %s::jsonb) "
+                    "on conflict (id) do nothing",
+                    (
+                        oid, cid, wb_date, Decimal("129"), Decimal("0"), Decimal("0"),
+                        f'[{{"sku":"HAIR-SERUM-50ML","quantity":1,"unit_price":129.0}}]',
+                    ),
+                )
+                conn.execute(
+                    "update customers set winback_count = 1 where id = %s", (cid,)
+                )
+
+    conn.commit()
+    print("Long-history cohort seeded: 40 customers, Jan 2025, 18 months of orders.")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -996,6 +1198,10 @@ def main() -> int:
     # ── Win-back / reactivation ────────────────────────────────────────────────
     print("  Seeding win-back customers...")
     seed_winback_customers(conn, RNG)
+
+    # ── Long-history cohort (Jan 2025 — 19 months backdated) ──────────────────
+    print("  Seeding long-history cohort (40 customers, Jan 2025, 18 months)...")
+    seed_long_history_cohort(conn, RNG)
 
     conn.close()
     print("\nSeed complete. Run check_invariants.py to verify.")

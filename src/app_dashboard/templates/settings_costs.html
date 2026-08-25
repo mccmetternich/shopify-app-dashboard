@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Cost Settings — {{ DASHBOARD_NAME }}{% endblock %}
+{% block content %}
+<h1>Cost Settings</h1>
+<p class="sub">COGS per SKU and order-level cost assumptions used in gross profit and LTV calculations. Changes apply to all future and historical calculations immediately.</p>
+
+{% if flash %}
+<div style="background: var(--ok-soft); color: var(--ok); border: 1px solid var(--ok); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 14px; font-weight: 500;">
+    Settings saved.
+</div>
+{% endif %}
+
+<form method="post" action="/settings/costs">
+    {# ── COGS per SKU ── #}
+    <div class="card">
+        <h2>COGS per unit by SKU</h2>
+        <p class="sub">Cost of goods sold (materials + fulfillment) per unit shipped. Used to compute gross profit for LTV, payback, and cohort analysis.</p>
+        {% if cost_inputs %}
+        <table class="data-table" style="margin-top:12px;">
+            <thead>
+                <tr>
+                    <th>SKU</th>
+                    <th>Label</th>
+                    <th class="num">Current COGS</th>
+                    <th class="num">New COGS ($)</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in cost_inputs %}
+                <tr>
+                    <td style="font-family:var(--mono);font-size:13px;">{{ item.sku }}</td>
+                    <td>{{ item.label or "—" }}</td>
+                    <td class="num">${{ "%.2f"|format(item.cogs) }}</td>
+                    <td class="num">
+                        <input type="number"
+                               name="cogs_{{ item.sku.replace('-', '_') }}"
+                               value="{{ "%.2f"|format(item.cogs) }}"
+                               step="0.01" min="0" max="9999"
+                               style="width:100px;text-align:right;font-family:var(--mono);font-size:13px;border:1px solid var(--border);border-radius:6px;padding:6px 8px;background:var(--card);color:var(--ink);">
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="sub" style="margin-top:10px;">No SKUs in cost_inputs yet. Run the seed or insert rows into the cost_inputs table.</p>
+        {% endif %}
+    </div>
+
+    {# ── Order-level cost settings ── #}
+    <div class="card" style="margin-top:16px;">
+        <h2>Order-level costs</h2>
+        <p class="sub">Applied to every order regardless of SKU. Payment fee percent is stored as a decimal (e.g. 0.029 for 2.9%) — enter as a percentage and it converts automatically.</p>
+        <table class="data-table" style="margin-top:12px;">
+            <thead>
+                <tr>
+                    <th>Setting</th>
+                    <th>Label</th>
+                    <th class="num">Current value</th>
+                    <th class="num">New value</th>
+                </tr>
+            </thead>
+            <tbody>
+                {# Shipping cost #}
+                {% set shipping = cost_settings.get("shipping_cost_per_order") %}
+                <tr>
+                    <td style="font-family:var(--mono);font-size:12px;">shipping_cost_per_order</td>
+                    <td>{{ shipping.label if shipping else "Shipping cost per order" }}</td>
+                    <td class="num">{% if shipping %}${{ "%.2f"|format(shipping.value) }}{% else %}—{% endif %}</td>
+                    <td class="num">
+                        <input type="number"
+                               name="shipping"
+                               value="{% if shipping %}{{ "%.2f"|format(shipping.value) }}{% endif %}"
+                               step="0.01" min="0" max="999"
+                               style="width:100px;text-align:right;font-family:var(--mono);font-size:13px;border:1px solid var(--border);border-radius:6px;padding:6px 8px;background:var(--card);color:var(--ink);">
+                    </td>
+                </tr>
+
+                {# Payment fee #}
+                {% set payment = cost_settings.get("payment_fee_pct") %}
+                <tr>
+                    <td style="font-family:var(--mono);font-size:12px;">payment_fee_pct</td>
+                    <td>{{ payment.label if payment else "Payment processing fee %" }}</td>
+                    <td class="num">{% if payment %}{{ "%.2f"|format(payment.value * 100) }}%{% else %}—{% endif %}</td>
+                    <td class="num">
+                        <input type="number"
+                               name="payment_fee_pct"
+                               value="{% if payment %}{{ "%.2f"|format(payment.value * 100) }}{% endif %}"
+                               step="0.01" min="0" max="100"
+                               placeholder="e.g. 2.90"
+                               style="width:100px;text-align:right;font-family:var(--mono);font-size:13px;border:1px solid var(--border);border-radius:6px;padding:6px 8px;background:var(--card);color:var(--ink);">
+                        <small class="sub" style="margin-left:4px;">%</small>
+                    </td>
+                </tr>
+
+                {# Return cost #}
+                {% set returns = cost_settings.get("return_processing_cost") %}
+                <tr>
+                    <td style="font-family:var(--mono);font-size:12px;">return_processing_cost</td>
+                    <td>{{ returns.label if returns else "Return processing cost" }}</td>
+                    <td class="num">{% if returns %}${{ "%.2f"|format(returns.value) }}{% else %}—{% endif %}</td>
+                    <td class="num">
+                        <input type="number"
+                               name="return_cost"
+                               value="{% if returns %}{{ "%.2f"|format(returns.value) }}{% endif %}"
+                               step="0.01" min="0" max="999"
+                               style="width:100px;text-align:right;font-family:var(--mono);font-size:13px;border:1px solid var(--border);border-radius:6px;padding:6px 8px;background:var(--card);color:var(--ink);">
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div style="margin-top:18px;display:flex;align-items:center;gap:12px;">
+        <button type="submit">Save cost settings</button>
+        <a href="/settings/costs" class="ghost">Discard changes</a>
+        <span class="sub">Changes take effect immediately on all metrics.</span>
+    </div>
+</form>
+{% endblock %}

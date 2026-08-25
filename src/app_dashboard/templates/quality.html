@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Data Quality — {{ DASHBOARD_NAME }}{% endblock %}
+{% block content %}
+<h1>Data Quality</h1>
+<p class="sub">Order integrity, orphaned records, and sync freshness per source. A clean data layer is the foundation every metric depends on.</p>
+
+{# ── A: Order integrity tiles ── #}
+<div class="card">
+    <h2 id="order-integrity">Order integrity</h2>
+    <div class="cards" style="gap:12px;margin-top:12px;">
+        <div class="card stat">
+            <div class="label">Total orders</div>
+            <div class="num">{{ "{:,}".format(quality.total_orders) }}</div>
+        </div>
+        <div class="card stat{% if quality.orders_no_customer > 0 %} down{% endif %}">
+            <div class="label">Orders missing customer_id</div>
+            <div class="num">{{ quality.orders_no_customer }}</div>
+            {% if quality.total_orders > 0 %}
+            <div class="delta">
+                <span class="delta-num">{{ "%.1f"|format(quality.orders_no_customer_pct) }}%</span> of all orders
+            </div>
+            {% endif %}
+        </div>
+        <div class="card stat">
+            <div class="label">Total subscription rows</div>
+            <div class="num">{{ "{:,}".format(quality.total_subs) }}</div>
+        </div>
+    </div>
+    {% if quality.orders_no_customer > 0 %}
+    <p class="sub" style="margin-top:10px;">
+        Orders without a customer_id cannot be attributed to a cohort or LTV calculation. Check the Shopify ingest pipeline — this usually means a guest checkout without an account was not linked at import time.
+    </p>
+    {% else %}
+    <p class="sub" style="margin-top:10px;">All orders have a customer_id. Order integrity is clean.</p>
+    {% endif %}
+</div>
+
+{# ── B: Orphaned rebills ── #}
+<div class="card">
+    <h2 id="orphaned-rebills">Orphaned subscription rebills</h2>
+    <p class="sub">Subscription rows whose customer_id does not exist in the customers table. These cannot be included in cohort or LTV analysis.</p>
+    <div class="cards" style="gap:12px;margin-top:12px;">
+        <div class="card stat{% if quality.orphan_sub_rebills > 0 %} down{% endif %}">
+            <div class="label">Orphaned rows</div>
+            <div class="num">{{ quality.orphan_sub_rebills }}</div>
+            {% if quality.total_subs > 0 %}
+            <div class="delta">
+                {% if quality.orphan_sub_rebills > 0 %}
+                <span class="delta-num">{{ "%.1f"|format(100 * quality.orphan_sub_rebills / quality.total_subs) }}%</span> of subscription rows
+                {% else %}
+                <span class="delta-num">0%</span> — all linked
+                {% endif %}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    {% if quality.orphan_sub_rebills > 0 %}
+    <p class="sub" style="margin-top:10px;">
+        Fix: re-run the customer import or cross-reference Recharge subscription IDs with Shopify customer IDs. Every orphaned row silently reduces LTV accuracy.
+    </p>
+    {% else %}
+    <p class="sub" style="margin-top:10px;">No orphaned rebills. Subscription rows all link to known customers.</p>
+    {% endif %}
+</div>
+
+{# ── C: Sync freshness per source ── #}
+<div class="card">
+    <h2 id="sync-freshness">Last sync per source</h2>
+    <p class="sub">Each source is expected to sync at least every 4 hours. Over 24 hours is a data outage.</p>
+    <div class="table-card" style="margin-top:10px;">
+        <table>
+            <thead>
+                <tr>
+                    <th>Source</th>
+                    <th>Last synced</th>
+                    <th>Age</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in quality.source_rows %}
+                <tr>
+                    <td style="font-family:var(--mono);font-size:13px;">{{ row.source }}</td>
+                    <td>
+                        {% if row.synced_at %}
+                        {{ row.synced_at.strftime("%Y-%m-%d %H:%M UTC") }}
+                        {% else %}
+                        <span class="sub">Never</span>
+                        {% endif %}
+                    </td>
+                    <td style="font-family:var(--mono);font-size:13px;">
+                        {% if row.status == "never" %}<span class="sub">—</span>
+                        {% elif row.status == "red" %}<span style="color:var(--down);">{{ row.age_str }}</span>
+                        {% elif row.status == "amber" %}<span style="color:#f59e0b;">{{ row.age_str }}</span>
+                        {% else %}<span style="color:var(--ok);">{{ row.age_str }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if row.status == "never" %}
+                        <span class="pill uninstalled">Never synced</span>
+                        {% elif row.status == "red" %}
+                        <span class="pill" style="background:rgba(232,89,12,.1);color:var(--down);">Stale (&gt;24h)</span>
+                        {% elif row.status == "amber" %}
+                        <span class="pill" style="background:rgba(245,158,11,.1);color:#b45309;">Warning (&gt;4h)</span>
+                        {% else %}
+                        <span class="pill installed">Fresh</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    <p class="sub" style="margin-top:8px;">
+        Green = synced within 4h. Amber = 4–24h. Red = over 24h. Never = source not yet wired.
+        The sync_state table is updated by each ingest job at the end of a successful run.
+    </p>
+</div>
+{% endblock %}

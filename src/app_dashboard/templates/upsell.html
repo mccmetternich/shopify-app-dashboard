@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}Upsell — {{ DASHBOARD_NAME }}{% endblock %}
+{% block content %}
+<h1>Upsell &amp; Revenue Mix</h1>
+<p class="sub">Three revenue streams, post-purchase upsell take rates, and LTV uplift from capsules adoption.</p>
+
+{# ── A: Three revenue streams ── #}
+<div class="card">
+    <h2 id="revenue-streams">Three revenue streams</h2>
+    <p class="sub">
+        New customer revenue = first-time buyer orders. Subscription recurring = rebills from existing subscribers.
+        Non-sub repeat = returning buyers who are not on a subscription. Mutually exclusive, last {{ window }} days.
+    </p>
+    {% if three_streams.total is not none %}
+    {% set total = three_streams.total %}
+    <div class="cards" style="gap:12px;margin-top:12px;">
+        <div class="card stat">
+            <div class="label">New customer revenue</div>
+            <div class="num">
+                {% if three_streams.new_customer_revenue is not none %}${{ "%.0f"|format(three_streams.new_customer_revenue) }}{% else %}—{% endif %}
+            </div>
+            {% if three_streams.new_customer_revenue is not none and total > 0 %}
+            <div class="delta"><span class="delta-num">{{ "%.0f"|format(100 * three_streams.new_customer_revenue / total) }}%</span> of total</div>
+            {% endif %}
+        </div>
+        <div class="card stat">
+            <div class="label">Subscription recurring</div>
+            <div class="num">
+                {% if three_streams.subscription_recurring_revenue is not none %}${{ "%.0f"|format(three_streams.subscription_recurring_revenue) }}{% else %}—{% endif %}
+            </div>
+            {% if three_streams.subscription_recurring_revenue is not none and total > 0 %}
+            <div class="delta"><span class="delta-num">{{ "%.0f"|format(100 * three_streams.subscription_recurring_revenue / total) }}%</span> of total</div>
+            {% endif %}
+        </div>
+        <div class="card stat">
+            <div class="label">Non-sub repeat</div>
+            <div class="num">
+                {% if three_streams.non_sub_repeat_revenue is not none %}${{ "%.0f"|format(three_streams.non_sub_repeat_revenue) }}{% else %}—{% endif %}
+            </div>
+            {% if three_streams.non_sub_repeat_revenue is not none and total > 0 %}
+            <div class="delta"><span class="delta-num">{{ "%.0f"|format(100 * three_streams.non_sub_repeat_revenue / total) }}%</span> of total</div>
+            {% endif %}
+        </div>
+        <div class="card stat" style="border-left: 3px solid var(--brand);">
+            <div class="label">Total</div>
+            <div class="num">${{ "%.0f"|format(total) }}</div>
+        </div>
+    </div>
+    {% if total > 0 %}
+    <div style="margin-top:14px;">
+        {% set new_w = (100 * three_streams.new_customer_revenue / total)|round|int if three_streams.new_customer_revenue else 0 %}
+        {% set sub_w = (100 * three_streams.subscription_recurring_revenue / total)|round|int if three_streams.subscription_recurring_revenue else 0 %}
+        {% set rep_w = (100 * three_streams.non_sub_repeat_revenue / total)|round|int if three_streams.non_sub_repeat_revenue else 0 %}
+        <div style="display:flex;height:24px;border-radius:6px;overflow:hidden;gap:2px;">
+            {% if new_w > 0 %}<div style="flex:{{ new_w }};background:var(--mv-new);height:100%;" title="New customer {{ new_w }}%"></div>{% endif %}
+            {% if sub_w > 0 %}<div style="flex:{{ sub_w }};background:var(--mv-reactivation);height:100%;" title="Subscription {{ sub_w }}%"></div>{% endif %}
+            {% if rep_w > 0 %}<div style="flex:{{ rep_w }};background:var(--mv-expansion);height:100%;" title="Non-sub repeat {{ rep_w }}%"></div>{% endif %}
+        </div>
+        <div class="legend" style="margin-top:6px;">
+            <span><i style="background:var(--mv-new)"></i>New customer</span>
+            <span><i style="background:var(--mv-reactivation)"></i>Subscription recurring</span>
+            <span><i style="background:var(--mv-expansion)"></i>Non-sub repeat</span>
+        </div>
+    </div>
+    {% endif %}
+    {% else %}
+    <div class="empty-state" style="margin-top:12px;"><p class="sub">No order data in last {{ window }} days.</p></div>
+    {% endif %}
+</div>
+
+{# ── B: Upsell take rates ── #}
+<div class="card">
+    <h2 id="upsell-take-rates">Post-purchase upsell take rates</h2>
+    <p class="sub">Take rate = accepted upsell events / total orders in the window. Zero take rate means the upsell was offered but none accepted.</p>
+    {% set upsell_labels = {
+        "priority_shipping": "Priority shipping",
+        "upsell_t1": "Upsell T1",
+        "upsell_t2": "Upsell T2",
+        "upsell_t3": "Upsell T3",
+        "aftersell": "Aftersell"
+    } %}
+    <div class="cards" style="gap:12px;margin-top:12px;">
+        {% for key, label in upsell_labels.items() %}
+        {% set d = upsell_data[key] if key in upsell_data else none %}
+        <div class="card stat">
+            <div class="label">{{ label }}</div>
+            <div class="num">
+                {% if d and d.take_rate is not none %}{{ "%.1f"|format(d.take_rate) }}%{% else %}—{% endif %}
+            </div>
+            {% if d %}
+            <div class="delta">
+                <span class="delta-num">{{ d.accepted }}</span> / {{ d.total }} offered
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+    {% if not upsell_data or upsell_data.values()|selectattr("take_rate")|list|length == 0 %}
+    <p class="sub" style="margin-top:10px;">No upsell_events data yet. Wire the post-purchase upsell integration to populate this.</p>
+    {% endif %}
+</div>
+
+{# ── C: Serum vs serum+capsules LTV ── #}
+<div class="card">
+    <h2 id="serum-ltv">Serum-only vs serum + capsules — 12m LTV</h2>
+    <p class="sub">Customers who also buy capsules on subscription vs those who buy serum only. LTV = cumulative GP over first 12 months per customer. Cohorts with &lt;12 months of history are excluded.</p>
+    {% if serum_ltv %}
+    <div class="cards" style="gap:12px;margin-top:12px;">
+        <div class="card stat">
+            <div class="label">Serum only</div>
+            <div class="num">
+                {% if serum_ltv.serum_only is not none %}${{ "%.0f"|format(serum_ltv.serum_only) }}{% else %}—{% endif %}
+            </div>
+        </div>
+        <div class="card stat{% if serum_ltv.serum_capsules is not none and serum_ltv.serum_only is not none and serum_ltv.serum_capsules > serum_ltv.serum_only %} up{% endif %}">
+            <div class="label">Serum + capsules</div>
+            <div class="num">
+                {% if serum_ltv.serum_capsules is not none %}${{ "%.0f"|format(serum_ltv.serum_capsules) }}{% else %}—{% endif %}
+            </div>
+        </div>
+        {% if serum_ltv.serum_capsules is not none and serum_ltv.serum_only is not none and serum_ltv.serum_only > 0 %}
+        <div class="card stat">
+            <div class="label">LTV uplift</div>
+            <div class="num">+{{ "%.0f"|format(100 * (serum_ltv.serum_capsules - serum_ltv.serum_only) / serum_ltv.serum_only) }}%</div>
+            <div class="delta">from adding capsules</div>
+        </div>
+        {% endif %}
+    </div>
+    {% else %}
+    <div class="empty-state" style="margin-top:12px;">
+        <p class="sub">No serum vs capsules LTV comparison yet. Requires subscription orders tagged with serum and capsules SKUs, and ≥12 months of customer history.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

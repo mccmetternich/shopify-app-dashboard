@@ -56,4 +56,25 @@ A rising diagonal means customers keep buying; a flat row after M0 means one-and
 <p class="sub">Each row is the month a subscription started; each cell is the share of that cohort
 still subscribed N months later. M0 is always 100%. Cells only appear once a cohort has been
 running long enough to observe that offset.</p>
+
+{# ── Offer-segmented cohort 2×2 grid ── #}
+<h2 id="offer-segments" style="margin-top:28px;">Cohorts by acquisition offer</h2>
+<p class="sub">Revenue per customer split by how the customer was acquired. Full-price buyers vs coupon, steep-intro, and win-back cohorts — apples-to-apples LTV comparison.</p>
+{% set offer_labels = {
+    "full-price": "Full-price",
+    "coupon-only": "Coupon only",
+    "steep-intro-discount": "Steep intro discount",
+    "reactivation": "Reactivation / win-back"
+} %}
+<div class="grid-2">
+    {% for offer_key, offer_label in offer_labels.items() %}
+    {% set d = offer_cohorts[offer_key] if offer_cohorts and offer_key in offer_cohorts else none %}
+    <div>
+        {{ cohort_grid(d if d else {"rows": [], "max_age": 0, "target_ltgp": 390.0},
+           offer_label, "usd",
+           "No cohort data for this offer segment yet.",
+           " — target LTGp per customer") }}
+    </div>
+    {% endfor %}
+</div>
 {% endblock %}

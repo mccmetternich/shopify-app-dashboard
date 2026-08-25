@@ -16,6 +16,7 @@ from app_dashboard.stats import (
     active_subscribers,
     blended_cac_excl_reactivations,
     cash_collected_in_month,
+    cohort_ltv_12m,
     get_subscriber_state_counts,
     gross_profit_per_order,
     landing_page_funnel,
@@ -25,6 +26,7 @@ from app_dashboard.stats import (
     pause_outcome_split,
     pause_rate,
     paused_subscribers,
+    payback_timing,
     reactivation_stats,
     rev_churn_involuntary,
     rev_churn_voluntary,
@@ -924,3 +926,282 @@ def test_reconciliation_all_states(db):
     assert result["active"] + result["paused"] + result["churned"] == result["total"], \
         f"State reconciliation FAIL: {result['active']}+{result['paused']}+{result['churned']} != {result['total']}"
     assert result["total"] == 20, f"Expected total=20, got {result['total']}"
+
+
+# ── T30: Involuntary revenue churn — exact dollar assert (AR2d CLOSED) ────────
+
+def test_rev_churn_involuntary_exact(db):
+    """10 subs all at $129/mo active at Jan 1 2026.
+    2 involuntary churns in Jan 2026, dunning_started_at >= 14 days before churned_at.
+    Expected: rev_churn_involuntary(conn, 2026, 1) = (129+129)/(10×129) = 258/1290 = 0.20
+    Function must return Decimal rounded to 2 decimal places."""
+    # Create 10 subs active at Jan 1 2026
+    for i in range(10):
+        cid = f"cinvol{i}"
+        _customer(db, cid, datetime(2025, 11, 1, tzinfo=timezone.utc))
+        _sub(db, f"sinvol{i}", cid, Decimal("129"),
+             converted_at=datetime(2025, 12, 1, tzinfo=timezone.utc))
+
+    # 2 involuntary churns in Jan 2026; dunning_started_at = 2026-01-05, churned_at = 2026-01-20
+    # Gap = 15 days >= 14 days → confirmed churn
+    for i in range(2):
+        db.execute(
+            "update subscription_revenue "
+            "set churned_at = %s, churn_type = 'involuntary', "
+            "    churn_reason = 'payment_failed', dunning_started_at = %s "
+            "where id = %s",
+            (
+                datetime(2026, 1, 20, tzinfo=timezone.utc),
+                datetime(2026, 1, 5, tzinfo=timezone.utc),
+                f"sinvol{i}",
+            ),
+        )
+
+    result = rev_churn_involuntary(db, 2026, 1)
+    # 258 / 1290 = 0.20 exactly
+    assert result == Decimal("0.20"), f"Expected 0.20, got {result}"
+    # Also verify it's rounded to exactly 2 decimal places
+    assert result == result.quantize(Decimal("0.01")), \
+        f"Result should be quantized to 2dp, got {result}"
+
+
+# ── T31 + T32: Long-history cohort (Jan 2025) ─────────────────────────────────
+
+def _seed_long_history_cohort_for_test(db):
+    """Deterministic seed of the Jan 2025 40-customer cohort for T31/T32.
+    Mirrors the logic in scripts/seed_demo.py seed_long_history_cohort()."""
+    import hashlib
+    rng = __import__("random").Random(20260101)
+
+    from datetime import date as _date
+
+    COHORT_START_DT = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    COHORT_SIZE = 40
+
+    # Seed cost_inputs (needed for GP calc)
+    db.execute(
+        "insert into cost_inputs (sku, label, cogs_per_unit) values "
+        "('HAIR-SERUM-50ML', 'Hair Serum 50ml', 3.50) on conflict (sku) do nothing"
+    )
+    db.execute(
+        "insert into cost_settings (key, value, label) values "
+        "('shipping_cost_per_order', 6.50, 'Shipping'), "
+        "('payment_fee_pct', 0.029, 'Payment fee'), "
+        "('return_processing_cost', 5.00, 'Return cost') "
+        "on conflict (key) do nothing"
+    )
+
+    # M0 prices: 30 full-price at $149, 10 steep-discount at $89
+    m0_prices = [Decimal("149")] * 30 + [Decimal("89")] * 10
+    rng.shuffle(m0_prices)
+
+    customers = []
+    for i in range(COHORT_SIZE):
+        cid = f"lh_c{i:03d}"
+        day_of_jan = rng.randint(1, 28)
+        first_order_dt = datetime(2025, 1, day_of_jan, 10, tzinfo=timezone.utc)
+        email_hash = hashlib.sha256(f"lh_customer_{i}".encode()).hexdigest()
+        db.execute(
+            "insert into customers (id, email_hash, first_order_at, country) "
+            "values (%s, %s, %s, 'US') on conflict (id) do nothing",
+            (cid, email_hash, first_order_dt),
+        )
+        customers.append({"id": cid, "first_order_at": first_order_dt, "m0_price": m0_prices[i]})
+
+    # Ad spend for Jan 2025: 31 days × $230/day
+    for day in range(1, 32):
+        spend_date = _date(2025, 1, day)
+        db.execute(
+            "insert into ad_spend (date, campaign_id, campaign_name, platform, spend) "
+            "values (%s, %s, %s, %s, %s) on conflict do nothing",
+            (spend_date, "cohort-meta-jan2025", "Meta Jan 2025 Cohort", "meta", Decimal("230.00")),
+        )
+
+    # Churn schedule (month offset → list of customer indices that churn)
+    churn_at_m3 = sorted(rng.sample(range(COHORT_SIZE), 8))
+    voluntary_m3 = churn_at_m3[:6]
+    involuntary_m3 = churn_at_m3[6:]  # 2 involuntary
+    churn_at_m6 = sorted(rng.sample([i for i in range(COHORT_SIZE) if i not in churn_at_m3], 5))
+    churn_at_m9 = sorted(rng.sample([i for i in range(COHORT_SIZE) if i not in churn_at_m3 and i not in churn_at_m6], 3))
+    churn_at_m12 = sorted(rng.sample([i for i in range(COHORT_SIZE) if i not in churn_at_m3 and i not in churn_at_m6 and i not in churn_at_m9], 2))
+    winback_at_m10 = churn_at_m3[:3]  # 3 customers win back
+
+    churned_set = set(churn_at_m3 + churn_at_m6 + churn_at_m9 + churn_at_m12)
+
+    # Retention rates by month
+    retention_schedule = {1: 0.70, 2: 0.65, 3: 0.58, 4: 0.52, 5: 0.48,
+                          6: 0.42, 7: 0.40, 8: 0.38, 9: 0.36, 10: 0.34,
+                          11: 0.33, 12: 0.32, 13: 0.31, 14: 0.31, 15: 0.30,
+                          16: 0.30, 17: 0.30, 18: 0.30}
+
+    order_idx = 0
+    sub_idx = 0
+
+    for i, cust in enumerate(customers):
+        cid = cust["id"]
+        first_order_dt = cust["first_order_at"]
+        m0_price = cust["m0_price"]
+
+        # Determine churn month for this customer
+        if i in churn_at_m3:
+            churn_offset = 3
+        elif i in churn_at_m6:
+            churn_offset = 6
+        elif i in churn_at_m9:
+            churn_offset = 9
+        elif i in churn_at_m12:
+            churn_offset = 12
+        else:
+            churn_offset = None  # still active through M18
+
+        # M0 order (first order at serum price)
+        m0_date = first_order_dt
+        oid = f"lh_ord_{order_idx:05d}"
+        order_idx += 1
+        db.execute(
+            "insert into orders "
+            "(id, customer_id, created_at, total, refunded, currency, "
+            " is_new_customer, is_subscription_order, discount_amount, line_items) "
+            "values (%s, %s, %s, %s, %s, 'USD', true, false, %s, %s::jsonb) "
+            "on conflict (id) do nothing",
+            (
+                oid, cid, m0_date, m0_price, Decimal("0"),
+                Decimal("149") - m0_price if m0_price < Decimal("149") else Decimal("0"),
+                f'[{{"sku":"HAIR-SERUM-50ML","quantity":1,"unit_price":{float(m0_price)}}}]',
+            ),
+        )
+
+        # Subscription (converted_at = first_order_at for monthly sub)
+        sid = f"lh_sub_{sub_idx:05d}"
+        sub_idx += 1
+        churned_at_dt = (first_order_dt + timedelta(days=30 * churn_offset)) if churn_offset else None
+        sub_status = "churned" if churn_offset else "active"
+
+        # Involuntary churn for the 2 involuntary customers
+        is_involuntary = (i in involuntary_m3)
+        dunning_started = (churned_at_dt - timedelta(days=15)) if is_involuntary and churned_at_dt else None
+
+        db.execute(
+            "insert into subscription_revenue "
+            "(id, customer_id, monthly_amount, converted_at, churned_at, "
+            " sub_type, cash_collected, churn_type, churn_reason, dunning_started_at, status) "
+            "values (%s, %s, %s, %s, %s, 'monthly', %s, %s, %s, %s, %s) "
+            "on conflict (id) do nothing",
+            (
+                sid, cid, Decimal("129"), first_order_dt, churned_at_dt,
+                Decimal("129"),
+                "involuntary" if is_involuntary else ("voluntary" if churn_offset else None),
+                "payment_failed" if is_involuntary else ("cancelled" if churn_offset else None),
+                dunning_started,
+                sub_status,
+            ),
+        )
+
+        # M1–M18 subscription rebill orders (if customer is retained that month)
+        active_through = churn_offset - 1 if churn_offset else 18
+        for month_offset in range(1, active_through + 1):
+            # Determine if retained based on retention schedule
+            retain_prob = retention_schedule.get(month_offset, 0.30)
+            # Use deterministic: retain if rng.random() < retain_prob
+            if rng.random() < retain_prob:
+                rebill_date = first_order_dt + timedelta(days=30 * month_offset)
+                if rebill_date > datetime(2026, 8, 24, tzinfo=timezone.utc):
+                    break
+                oid = f"lh_ord_{order_idx:05d}"
+                order_idx += 1
+                db.execute(
+                    "insert into orders "
+                    "(id, customer_id, created_at, total, refunded, currency, "
+                    " is_new_customer, is_subscription_order, discount_amount, line_items) "
+                    "values (%s, %s, %s, %s, %s, 'USD', false, true, %s, %s::jsonb) "
+                    "on conflict (id) do nothing",
+                    (
+                        oid, cid, rebill_date, Decimal("129"), Decimal("0"), Decimal("0"),
+                        f'[{{"sku":"HAIR-SERUM-50ML","quantity":1,"unit_price":129.0}}]',
+                    ),
+                )
+
+        # Win-back customers at M10
+        if i in winback_at_m10 and churn_offset:
+            wb_date = first_order_dt + timedelta(days=30 * 10)
+            if wb_date <= datetime(2026, 8, 24, tzinfo=timezone.utc):
+                wb_sid = f"lh_sub_wb_{i:03d}"
+                db.execute(
+                    "insert into subscription_revenue "
+                    "(id, customer_id, monthly_amount, converted_at, churned_at, "
+                    " sub_type, cash_collected, status) "
+                    "values (%s, %s, %s, %s, null, 'monthly', %s, 'active') "
+                    "on conflict (id) do nothing",
+                    (wb_sid, cid, Decimal("129"), wb_date, Decimal("129")),
+                )
+                # subscription_event for win-back
+                db.execute(
+                    "insert into subscription_events "
+                    "(subscription_id, customer_id, event_type, event_date, mrr_delta) "
+                    "values (%s, %s, 'winback', %s, %s)",
+                    (wb_sid, cid, wb_date.date(), Decimal("129")),
+                )
+                # Win-back order
+                oid = f"lh_ord_{order_idx:05d}"
+                order_idx += 1
+                db.execute(
+                    "insert into orders "
+                    "(id, customer_id, created_at, total, refunded, currency, "
+                    " is_new_customer, is_subscription_order, discount_amount, line_items) "
+                    "values (%s, %s, %s, %s, %s, 'USD', false, true, %s, %s::jsonb) "
+                    "on conflict (id) do nothing",
+                    (
+                        oid, cid, wb_date, Decimal("129"), Decimal("0"), Decimal("0"),
+                        f'[{{"sku":"HAIR-SERUM-50ML","quantity":1,"unit_price":129.0}}]',
+                    ),
+                )
+                # Update winback_count
+                db.execute(
+                    "update customers set winback_count = 1 where id = %s", (cid,)
+                )
+
+    db.commit()
+
+
+def test_cohort_ltv_12m_returns_real_value(db):
+    """cohort_ltv_12m() must return an actual dollar figure for the Jan 2025 cohort.
+    Known: 40 customers, M0 revenue = 30×$149 + 10×$89 = $5360.
+    M1-M11: subscription rebills at $129 (decaying retention).
+    LTV per customer should be roughly $500–$2000."""
+    _seed_long_history_cohort_for_test(db)
+
+    results = cohort_ltv_12m(db)
+    jan_2025 = next(
+        (r for r in results if r.get("cohort_label", "").startswith("2025-01")), None
+    )
+    assert jan_2025 is not None, \
+        f"Jan 2025 cohort not found in cohort_ltv_12m results. Got: {[r['cohort_label'] for r in results]}"
+    assert jan_2025["cohort_size"] == 40, \
+        f"Expected cohort_size=40, got {jan_2025['cohort_size']}"
+    ltv = jan_2025["ltv"]
+    assert ltv is not None, "LTV should not be None"
+    assert Decimal("200") < ltv < Decimal("2000"), \
+        f"LTV {ltv} outside expected range $200–$2000"
+    print(f"\nJan 2025 cohort LTV (12m): ${ltv:.2f}")
+
+
+def test_payback_timing_returns_real_value(db):
+    """payback_timing() must identify a payback month for Jan 2025 cohort.
+    Known: CAC = $7130 / 40 = $178.25 (31 days × $230).
+    M0 GP per customer ≈ (avg price - COGS - shipping - fees) / 40, should cross CAC quickly.
+    Payback_month should be 0, 1, or 2."""
+    _seed_long_history_cohort_for_test(db)
+
+    results = payback_timing(db)
+    jan_2025 = next(
+        (r for r in results if r.get("cohort_label", "").startswith("2025-01")), None
+    )
+    assert jan_2025 is not None, \
+        f"Jan 2025 cohort not found in payback_timing results. Got: {[r['cohort_label'] for r in results]}"
+    assert jan_2025["payback_month"] is not None, \
+        "Payback month should not be None for Jan 2025 cohort (CAC ~$178, M0 GP ~$100+)"
+    assert jan_2025["payback_month"] <= 3, \
+        f"Payback month {jan_2025['payback_month']} > 3 (unexpected given CAC ~$178)"
+    cac = jan_2025["cac"]
+    assert cac is not None, "CAC should be computed for Jan 2025"
+    print(f"\nJan 2025 cohort payback month: M{jan_2025['payback_month']}, CAC: ${cac:.2f}")

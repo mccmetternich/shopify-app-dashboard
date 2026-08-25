@@ -93,6 +93,49 @@
 </div>
 
 <div class="card">
+    <h2 id="revenue-streams">Revenue streams</h2>
+    <p class="sub">New customer, subscription recurring, and non-sub repeat — mutually exclusive, last {{ window }} days.</p>
+    {% if three_streams and three_streams.total is not none %}
+    {% set ts = three_streams %}
+    {% set total = ts.total %}
+    <div class="cards" style="gap:12px;margin-top:10px;">
+        <div class="card stat">
+            <div class="label">New customer</div>
+            <div class="num">{% if ts.new_customer_revenue is not none %}${{ "%.0f"|format(ts.new_customer_revenue) }}{% else %}—{% endif %}</div>
+            {% if ts.new_customer_revenue is not none and total > 0 %}<div class="delta"><span class="delta-num">{{ "%.0f"|format(100 * ts.new_customer_revenue / total) }}%</span></div>{% endif %}
+        </div>
+        <div class="card stat">
+            <div class="label">Subscription recurring</div>
+            <div class="num">{% if ts.subscription_recurring_revenue is not none %}${{ "%.0f"|format(ts.subscription_recurring_revenue) }}{% else %}—{% endif %}</div>
+            {% if ts.subscription_recurring_revenue is not none and total > 0 %}<div class="delta"><span class="delta-num">{{ "%.0f"|format(100 * ts.subscription_recurring_revenue / total) }}%</span></div>{% endif %}
+        </div>
+        <div class="card stat">
+            <div class="label">Non-sub repeat</div>
+            <div class="num">{% if ts.non_sub_repeat_revenue is not none %}${{ "%.0f"|format(ts.non_sub_repeat_revenue) }}{% else %}—{% endif %}</div>
+            {% if ts.non_sub_repeat_revenue is not none and total > 0 %}<div class="delta"><span class="delta-num">{{ "%.0f"|format(100 * ts.non_sub_repeat_revenue / total) }}%</span></div>{% endif %}
+        </div>
+    </div>
+    {% if total > 0 %}
+    {% set new_w = (100 * ts.new_customer_revenue / total)|round|int if ts.new_customer_revenue else 0 %}
+    {% set sub_w = (100 * ts.subscription_recurring_revenue / total)|round|int if ts.subscription_recurring_revenue else 0 %}
+    {% set rep_w = (100 * ts.non_sub_repeat_revenue / total)|round|int if ts.non_sub_repeat_revenue else 0 %}
+    <div style="display:flex;height:20px;border-radius:5px;overflow:hidden;gap:2px;margin-top:12px;">
+        {% if new_w > 0 %}<div style="flex:{{ new_w }};background:var(--mv-new);" title="New {{ new_w }}%"></div>{% endif %}
+        {% if sub_w > 0 %}<div style="flex:{{ sub_w }};background:var(--mv-reactivation);" title="Sub {{ sub_w }}%"></div>{% endif %}
+        {% if rep_w > 0 %}<div style="flex:{{ rep_w }};background:var(--mv-expansion);" title="Non-sub repeat {{ rep_w }}%"></div>{% endif %}
+    </div>
+    <div class="legend" style="margin-top:6px;">
+        <span><i style="background:var(--mv-new)"></i>New customer</span>
+        <span><i style="background:var(--mv-reactivation)"></i>Subscription</span>
+        <span><i style="background:var(--mv-expansion)"></i>Non-sub repeat</span>
+    </div>
+    {% endif %}
+    {% else %}
+    <p class="sub" style="margin-top:8px;">No order data in this window.</p>
+    {% endif %}
+</div>
+
+<div class="card">
     <h2 id="funnel">Acquisition funnel</h2>
     {% if funnel.has_data %}
     <p class="sub">Sessions → Add to cart → Checkout → Purchase. Source: Google Analytics 4. Conversion rates are estimated from GA4 event counts, not a Shopify hard count.</p>
