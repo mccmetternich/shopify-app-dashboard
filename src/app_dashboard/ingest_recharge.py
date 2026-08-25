@@ -120,6 +120,38 @@ def _upsert_subscription(
     return result.rowcount
 
 
+def _emit_mrr_recognized(conn: psycopg.Connection, charge: dict) -> None:
+    """Emit one 'mrr_recognized' event per successful charge cycle.
+
+    Idempotent on source_id = 'rc_charge_<charge_id>'. Re-running after a
+    cursor expiry is safe — ON CONFLICT (source_id) DO NOTHING absorbs the
+    duplicate and writes zero rows.
+
+    event_date = charge.scheduled_at::date (billing date, exact).
+    mrr_delta  = charge.total_price (positive — cash collected this cycle).
+    approximation_reason = NULL (scheduled_at is an exact API field).
+    """
+    sub_id = charge.get("subscription_id", "")
+    if not sub_id:
+        return
+    conn.execute(
+        """
+        insert into subscription_events
+            (subscription_id, customer_id, event_type, event_date,
+             mrr_delta, source_id, approximation_reason)
+        values (%s, %s, 'mrr_recognized', %s, %s, %s, null)
+        on conflict (source_id) do nothing
+        """,
+        (
+            sub_id,
+            charge["customer_id"],
+            charge["scheduled_at"].date(),
+            charge["total_price"],
+            f"rc_charge_{charge['id']}",
+        ),
+    )
+
+
 def _mark_churned(conn: psycopg.Connection) -> int:
     """Retroactively churn subscriptions with no charge in the last 45 days.
 
@@ -225,6 +257,7 @@ def sync_subscription_revenue(
                 _ensure_customer(conn, charge["customer_id"])
                 upserted = _upsert_subscription(conn, charge)
                 total_upserted += upserted
+                _emit_mrr_recognized(conn, charge)
 
             _update_sync_state(conn, next_cursor)
 
@@ -466,6 +499,12 @@ def sync_subscription_events(
                                 mrr_delta,
                                 sub.get("cancellation_reason"),
                             ),
+                        )
+                        # Mark the subscription as voluntary churn so the waterfall
+                        # churned_mrr_voluntary bucket can join on churn_type.
+                        conn.execute(
+                            "update subscription_revenue set churn_type = 'voluntary' where id = %s",
+                            (sub_id,),
                         )
                         churn_emitted += 1
 
