@@ -168,7 +168,7 @@ def run_meta_sync_job(conn_factory, settings) -> None:
 
 
 def run_recharge_sync_job(conn_factory, settings) -> None:
-    """Sync Recharge subscription charges. NO-OP if recharge_api_token is unset."""
+    """Sync Recharge subscription charges + lifecycle events. NO-OP if token unset."""
     if not settings.recharge_api_token:
         logger.warning(
             "recharge_sync: RECHARGE_API_TOKEN is not set — skipping. "
@@ -176,12 +176,18 @@ def run_recharge_sync_job(conn_factory, settings) -> None:
         )
         return
     from app_dashboard.recharge import RechargeClient
-    from app_dashboard.ingest_recharge import sync_subscription_revenue
+    from app_dashboard.ingest_recharge import sync_subscription_revenue, sync_subscription_events
     conn = conn_factory()
     try:
         with RechargeClient(api_token=settings.recharge_api_token) as client:
             n = sync_subscription_revenue(conn, client)
             logger.info("recharge_sync: %d subscription rows upserted", n)
+            # Event emission runs after charges so subscription_revenue is populated.
+            e = sync_subscription_events(
+                conn, client,
+                poll_interval_minutes=settings.recharge_poll_interval_minutes,
+            )
+            logger.info("recharge_sync: %d lifecycle events written", e)
         _clear_sync_error(conn_factory, SOURCE_RECHARGE)
     except Exception as exc:
         logger.exception("recharge_sync failed")

@@ -165,6 +165,111 @@ class RechargeClient:
         )
         return charges, next_cursor
 
+    def fetch_subscriptions(
+        self,
+        updated_at_min: datetime,
+        cursor: str | None = None,
+    ) -> tuple[list[dict], str | None]:
+        """Fetch one page of subscriptions updated since `updated_at_min`.
+
+        Returns (subscriptions, next_cursor). next_cursor is None on the last page.
+
+        Fields returned per subscription:
+          id, customer_id, status ('active'|'paused'|'cancelled'),
+          created_at, cancelled_at (None if not cancelled),
+          paused_at (None if not paused), price (Decimal),
+          cancellation_reason (text, None if absent).
+
+        Test subscriptions: Recharge does not expose a test flag on subscriptions
+        directly, but test charges are already filtered in fetch_charges(). We
+        include all subscriptions here — test subs without any real charges won't
+        appear in subscription_revenue and will be skipped by the differ.
+        """
+        params: dict = {
+            "limit": 250,
+            "updated_at_min": updated_at_min.astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+        }
+        if cursor:
+            params["cursor"] = cursor
+
+        resp = self._client.get(
+            f"{self.BASE_URL}/subscriptions",
+            headers=self._headers,
+            params=params,
+        )
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"Recharge /subscriptions returned {exc.response.status_code}: "
+                f"{exc.response.text[:200]}"
+            ) from exc
+
+        body = resp.json()
+        raw_subs = body.get("subscriptions", [])
+        next_cursor = body.get("next_cursor") or None
+
+        subs = []
+        for sub in raw_subs:
+            status = sub.get("status", "")
+            if status not in ("active", "paused", "cancelled"):
+                logger.debug(
+                    "fetch_subscriptions: unknown status %r on sub %s, skipping",
+                    status, sub.get("id"),
+                )
+                continue
+
+            cancelled_at = None
+            if sub.get("cancelled_at"):
+                try:
+                    cancelled_at = _parse_utc(sub["cancelled_at"])
+                except (ValueError, KeyError):
+                    pass
+
+            paused_at = None
+            if sub.get("paused_at"):
+                try:
+                    paused_at = _parse_utc(sub["paused_at"])
+                except (ValueError, KeyError):
+                    pass
+
+            # Recharge may store cancellation reason in cancellation_reason,
+            # cancellation_reason_comments, or a nested object.
+            reason = (
+                sub.get("cancellation_reason_comments")
+                or sub.get("cancellation_reason")
+                or None
+            )
+            if isinstance(reason, dict):
+                # Some API versions return a structured object; flatten to text.
+                reason = str(reason)
+
+            price = None
+            if sub.get("price") is not None:
+                try:
+                    price = _parse_decimal(sub["price"])
+                except ValueError:
+                    pass
+
+            subs.append({
+                "id": str(sub["id"]),
+                "customer_id": str(sub["customer_id"]),
+                "status": status,
+                "created_at": _parse_utc(sub["created_at"]),
+                "cancelled_at": cancelled_at,
+                "paused_at": paused_at,
+                "price": price,
+                "cancellation_reason": reason,
+            })
+
+        logger.debug(
+            "fetch_subscriptions: %d subs (of %d raw), next_cursor=%r",
+            len(subs), len(raw_subs), next_cursor,
+        )
+        return subs, next_cursor
+
     def close(self) -> None:
         self._client.close()
 
