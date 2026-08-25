@@ -6,6 +6,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 # Read-only by default. Nothing here writes to the repository, and a public fork
 # should not inherit a broadly-scoped token.

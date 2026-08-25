@@ -61,7 +61,7 @@ def test_fetch_charges_returns_real_charges():
 
     client = RechargeClient(api_token="token")
     with patch.object(client._client, "get", return_value=mock_resp):
-        charges, next_cursor = client.fetch_charges(
+        charges, next_cursor, _ = client.fetch_charges(
             updated_at_min=datetime(2026, 8, 1, tzinfo=timezone.utc)
         )
 
@@ -82,7 +82,7 @@ def test_fetch_charges_filters_test_charges():
 
     client = RechargeClient(api_token="token")
     with patch.object(client._client, "get", return_value=mock_resp):
-        charges, _ = client.fetch_charges(
+        charges, _, _ = client.fetch_charges(
             updated_at_min=datetime(2026, 8, 1, tzinfo=timezone.utc)
         )
 
@@ -90,8 +90,8 @@ def test_fetch_charges_filters_test_charges():
     assert charges[0]["id"] == "real_001"
 
 
-def test_fetch_charges_non_usd_raises():
-    """Non-USD charges must raise AssertionError — never silently convert."""
+def test_fetch_charges_non_usd_skipped():
+    """Non-USD charges are skipped and counted — pipeline must not stall on GBP rows."""
     body = _recharge_response([
         _recharge_charge(currency="GBP"),
     ])
@@ -101,10 +101,12 @@ def test_fetch_charges_non_usd_raises():
 
     client = RechargeClient(api_token="token")
     with patch.object(client._client, "get", return_value=mock_resp):
-        with pytest.raises(AssertionError, match="USD"):
-            client.fetch_charges(
-                updated_at_min=datetime(2026, 8, 1, tzinfo=timezone.utc)
-            )
+        charges, _, skipped_non_usd = client.fetch_charges(
+            updated_at_min=datetime(2026, 8, 1, tzinfo=timezone.utc)
+        )
+
+    assert len(charges) == 0
+    assert skipped_non_usd == 1
 
 
 def test_fetch_charges_total_price_is_decimal():
@@ -115,7 +117,7 @@ def test_fetch_charges_total_price_is_decimal():
 
     client = RechargeClient(api_token="token")
     with patch.object(client._client, "get", return_value=mock_resp):
-        charges, _ = client.fetch_charges(
+        charges, _, _ = client.fetch_charges(
             updated_at_min=datetime(2026, 8, 1, tzinfo=timezone.utc)
         )
 
@@ -131,7 +133,7 @@ def test_fetch_charges_pagination():
 
     client = RechargeClient(api_token="token")
     with patch.object(client._client, "get", return_value=mock_resp):
-        charges, next_cursor = client.fetch_charges(
+        charges, next_cursor, _ = client.fetch_charges(
             updated_at_min=datetime(2026, 8, 1, tzinfo=timezone.utc)
         )
 
@@ -143,8 +145,7 @@ def test_fetch_charges_pagination():
 def test_sync_subscription_revenue_inserts_rows(db):
     charges = [
         _recharge_charge("rc_001", "cust_001", "sub_001", "99.00"),
-        _recharge_charge("rc_002", "cust_002", "sub_002", "149.00",
-                         customer_id="cust_002"),
+        _recharge_charge("rc_002", "cust_002", "sub_002", "149.00"),
     ]
     body = _recharge_response(charges)
     mock_resp = MagicMock()

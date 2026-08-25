@@ -744,7 +744,15 @@ def test_days_of_cover_computed_correctly(db):
     """Sanity-check the formula: units_on_hand / (units_sold_14d / 14)."""
     now = datetime.now(timezone.utc)
     _customer(db, "c1")
-    # Insert 14 orders spread across the last 14 days, each selling 1 unit
+    # One anchor order at 15 days ago: passes the >=14-day data-age guard
+    # without landing inside the 14-day unit-sales window.
+    db.execute(
+        "insert into orders (id, customer_id, created_at, total, refunded, currency, "
+        "is_new_customer, line_items) values ('o_anchor', 'c1', %s, 149, 0, 'USD', false, "
+        """'[{"sku":"HAIR-SERUM-50ML","quantity":1,"unit_price":149}]'::jsonb)""",
+        (now - timedelta(days=15),),
+    )
+    # 14 orders at days 0–13: all inside the 14-day window, no boundary ambiguity.
     for i in range(14):
         db.execute(
             "insert into orders (id, customer_id, created_at, total, refunded, currency, "
@@ -757,6 +765,6 @@ def test_days_of_cover_computed_correctly(db):
         "values ('HAIR-SERUM-50ML', 140, now())"
     )
     db.commit()
-    # 14 units in 14 days = 1/day; 140 units on hand → 140 days of cover
+    # 14 units sold in 14 days = 1/day; 140 units on hand → 140 days of cover
     result = days_of_cover(db, "HAIR-SERUM-50ML")
     assert result == 140, f"expected 140 days of cover, got {result}"

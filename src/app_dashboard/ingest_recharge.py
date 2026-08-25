@@ -140,7 +140,7 @@ def _emit_mrr_recognized(conn: psycopg.Connection, charge: dict) -> None:
             (subscription_id, customer_id, event_type, event_date,
              mrr_delta, source_id, approximation_reason)
         values (%s, %s, 'mrr_recognized', %s, %s, %s, null)
-        on conflict (source_id) do nothing
+        on conflict (source_id) where source_id is not null do nothing
         """,
         (
             sub_id,
@@ -203,19 +203,20 @@ def _mark_churned(conn: psycopg.Connection) -> int:
         (cutoff, sub_ids),
     )
 
-    conn.executemany(
-        """
-        insert into subscription_events
-            (subscription_id, customer_id, event_type, event_date, mrr_delta, approximation_reason)
-        values (%s, %s, 'churn', %s, %s, %s)
-        on conflict (subscription_id, event_type, event_date) where source_id is null
-        do nothing
-        """,
-        [
-            (sub_id, customer_id, event_date, -monthly_amount, reason)
-            for sub_id, customer_id, monthly_amount in rows
-        ],
-    )
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            insert into subscription_events
+                (subscription_id, customer_id, event_type, event_date, mrr_delta, approximation_reason)
+            values (%s, %s, 'churn', %s, %s, %s)
+            on conflict (subscription_id, event_type, event_date) where source_id is null
+            do nothing
+            """,
+            [
+                (sub_id, customer_id, event_date, -monthly_amount, reason)
+                for sub_id, customer_id, monthly_amount in rows
+            ],
+        )
     return len(rows)
 
 
